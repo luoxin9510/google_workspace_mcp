@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 configure_file_logging()
 
+VALID_SERVICES = frozenset({
+    "gmail", "drive", "calendar", "docs", "sheets", "chat",
+    "forms", "slides", "tasks", "contacts", "search", "appscript",
+})
+
 
 def safe_print(text):
     # Don't print to stderr when running as MCP server via uvx to avoid JSON parsing errors
@@ -158,20 +163,7 @@ def main():
     parser.add_argument(
         "--tools",
         nargs="*",
-        choices=[
-            "gmail",
-            "drive",
-            "calendar",
-            "docs",
-            "sheets",
-            "chat",
-            "forms",
-            "slides",
-            "tasks",
-            "contacts",
-            "search",
-            "appscript",
-        ],
+        choices=sorted(VALID_SERVICES),
         help="Specify which tools to register. If not provided, all tools are registered.",
     )
     parser.add_argument(
@@ -205,18 +197,18 @@ def main():
     args = parser.parse_args()
 
     # Env var fallbacks for plugin users who configure via userConfig
-    _VALID_SERVICES = {
-        "gmail", "drive", "calendar", "docs", "sheets", "chat",
-        "forms", "slides", "tasks", "contacts", "search", "appscript",
-    }
     if args.tools is None:
         _env_tools = os.getenv("WORKSPACE_MCP_TOOLS")
         if _env_tools:
-            _parsed = [t.strip() for t in _env_tools.split(",") if t.strip() in _VALID_SERVICES]
+            _raw = [t.strip().lower() for t in _env_tools.split(",") if t.strip()]
+            _invalid = [t for t in _raw if t not in VALID_SERVICES]
+            if _invalid:
+                logger.warning("Ignoring invalid services from WORKSPACE_MCP_TOOLS: %s", _invalid)
+            _parsed = [t for t in _raw if t in VALID_SERVICES]
             if _parsed:
                 args.tools = _parsed
     if args.tool_tier is None:
-        _env_tier = os.getenv("WORKSPACE_MCP_TOOL_TIER")
+        _env_tier = os.getenv("WORKSPACE_MCP_TOOL_TIER", "").lower()
         if _env_tier in {"core", "extended", "complete"}:
             args.tool_tier = _env_tier
     if not args.read_only:
