@@ -653,9 +653,7 @@ async def _fetch_thread_reply_context(
         if not include_bodies:
             request_kwargs["metadataHeaders"] = header_names
 
-        request = service.users().threads().get(
-            **request_kwargs
-        )
+        request = service.users().threads().get(**request_kwargs)
         thread = await asyncio.to_thread(request.execute)
     except Exception as e:
         logger.warning(f"Failed to fetch reply context for thread {thread_id}: {e}")
