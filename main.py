@@ -211,11 +211,11 @@ def main():
             if _parsed:
                 args.tools = _parsed
     if args.tool_tier is None:
-        _env_tier = os.getenv("WORKSPACE_MCP_TOOL_TIER", "").lower()
+        _env_tier = os.getenv("WORKSPACE_MCP_TOOL_TIER", "").strip().lower()
         if _env_tier in {"core", "extended", "complete"}:
             args.tool_tier = _env_tier
     if not args.read_only:
-        _env_ro = os.getenv("WORKSPACE_MCP_READ_ONLY", "").lower()
+        _env_ro = os.getenv("WORKSPACE_MCP_READ_ONLY", "").strip().lower()
         if _env_ro in {"true", "1", "yes"}:
             args.read_only = True
     if args.permissions is None:
