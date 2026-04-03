@@ -127,7 +127,7 @@ class SecureFastMCP(FastMCP):
                 patched.append(tool)
         return patched
 
-    async def call_tool(self, name: str, arguments: dict, *args, **kwargs):
+    async def call_tool(self, name: str, arguments: Optional[dict], *args, **kwargs):
         """Inject user_google_email before pydantic validates the call arguments.
 
         When USER_GOOGLE_EMAIL is configured and OAuth 2.1 is not active, callers
@@ -135,6 +135,7 @@ class SecureFastMCP(FastMCP):
         arguments against the function signature BEFORE calling the tool, so we must
         inject the default BEFORE that validation step.
         """
+        arguments = arguments or {}
         if (
             not is_oauth21_enabled()
             and USER_GOOGLE_EMAIL

@@ -359,7 +359,9 @@ def _extract_oauth20_user_email(
     Raises:
         Exception: If user_google_email parameter not found
     """
-    bound_args = wrapper_sig.bind(*args, **kwargs)
+    # Use partial binding so single-user mode can omit user_google_email and
+    # let the configured env-var default supply it.
+    bound_args = wrapper_sig.bind_partial(*args, **kwargs)
     bound_args.apply_defaults()
 
     user_google_email = bound_args.arguments.get("user_google_email")
