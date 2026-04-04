@@ -47,6 +47,13 @@
       "type": "string",
       "sensitive": false,
       "required": true
+    },
+    "transport": {
+      "title": "Transport mode",
+      "description": "stdio (default) or streamable-http. Use streamable-http to enable workspace-cli access.",
+      "type": "string",
+      "sensitive": false,
+      "required": true
     }
   },
   "mcpServers": {
@@ -59,7 +66,8 @@
         "WORKSPACE_MCP_TOOLS": "${user_config.tools}",
         "WORKSPACE_MCP_TOOL_TIER": "${user_config.tool_tier}",
         "WORKSPACE_MCP_READ_ONLY": "${user_config.read_only}",
-        "WORKSPACE_MCP_PERMISSIONS": "${user_config.permissions}"
+        "WORKSPACE_MCP_PERMISSIONS": "${user_config.permissions}",
+        "WORKSPACE_MCP_TRANSPORT": "${user_config.transport}"
       }
     }
   }

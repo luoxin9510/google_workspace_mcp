@@ -222,6 +222,9 @@ def main():
         _env_perms = os.getenv("WORKSPACE_MCP_PERMISSIONS")
         if _env_perms:
             args.permissions = _env_perms.split()
+    _env_transport = os.getenv("WORKSPACE_MCP_TRANSPORT", "").strip().lower()
+    if _env_transport in {"stdio", "streamable-http"} and args.transport == "stdio":
+        args.transport = _env_transport
 
     # Validate mutually exclusive flags
     if args.permissions and args.read_only:
