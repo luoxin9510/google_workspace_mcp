@@ -87,6 +87,7 @@ def configure_safe_logging():
         """Enhanced ASCII formatter with additional Windows safety."""
 
         def format(self, record):
+            """Format a log record, falling back to ASCII if encoding fails."""
             try:
                 return super().format(record)
             except UnicodeEncodeError:
@@ -570,7 +571,8 @@ def main():
                     print(f"Error: invalid WORKSPACE_MCP_HTTP_PORT '{_cli_port}'.", file=sys.stderr)
                     sys.exit(1)
 
-                async def _run_dual():
+                async def _run_dual() -> None:
+                    """Run stdio and HTTP transports concurrently."""
                     http_available = True
                     try:
                         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
