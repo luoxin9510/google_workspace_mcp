@@ -66,6 +66,12 @@ class OAuthConfig:
         # Service account (domain-wide delegation) configuration
         self.service_account_key_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY_FILE")
         self.service_account_key_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY_JSON")
+        if self.service_account_key_file and self.service_account_key_json:
+            raise ValueError(
+                "Only one service account key source may be provided. "
+                "Set either GOOGLE_SERVICE_ACCOUNT_KEY_FILE or "
+                "GOOGLE_SERVICE_ACCOUNT_KEY_JSON, not both."
+            )
         self.service_account_enabled = bool(
             self.service_account_key_file or self.service_account_key_json
         )

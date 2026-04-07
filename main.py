@@ -1,5 +1,6 @@
 import io
 import argparse
+import json
 import logging
 import os
 import socket
@@ -15,7 +16,7 @@ _original_stdout = sys.stdout
 if sys.platform == "darwin":
     sys.stdout = io.StringIO()
 
-from auth.oauth_config import reload_oauth_config, is_stateless_mode, is_service_account_enabled  # noqa: E402
+from auth.oauth_config import reload_oauth_config, get_oauth_config, is_stateless_mode, is_service_account_enabled  # noqa: E402
 from core.log_formatter import EnhancedLogFormatter, configure_file_logging  # noqa: E402
 from core.utils import check_credentials_directory_permissions  # noqa: E402
 from core.server import server, set_transport_mode, configure_server_for_http  # noqa: E402
@@ -469,6 +470,37 @@ def main():
             safe_print(
                 "   Set USER_GOOGLE_EMAIL to the domain user to impersonate"
             )
+            sys.exit(1)
+        # Validate service account key material before advertising readiness
+        sa_config = get_oauth_config()
+        try:
+            if sa_config.service_account_key_file:
+                with open(sa_config.service_account_key_file) as f:
+                    key_data = json.load(f)
+            else:
+                key_data = json.loads(sa_config.service_account_key_json)
+            required_fields = {"type", "project_id", "private_key", "client_email"}
+            missing = required_fields - set(key_data.keys())
+            if missing:
+                safe_print(
+                    f"❌ Service account key missing required fields: "
+                    f"{', '.join(sorted(missing))}"
+                )
+                sys.exit(1)
+            if key_data.get("type") != "service_account":
+                safe_print(
+                    f"❌ Service account key has unexpected type: "
+                    f"{key_data.get('type')!r}"
+                )
+                sys.exit(1)
+        except FileNotFoundError as e:
+            safe_print(f"❌ Service account key file not found: {e}")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            safe_print(f"❌ Service account key contains invalid JSON: {e}")
+            sys.exit(1)
+        except (IOError, OSError) as e:
+            safe_print(f"❌ Failed to read service account key: {e}")
             sys.exit(1)
         safe_print("🔐 Service account mode enabled (domain-wide delegation)")
         safe_print(f"   Impersonating: {user_email}")

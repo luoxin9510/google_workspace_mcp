@@ -88,8 +88,9 @@ async def _get_auth_context(
         if mcp_session_id:
             set_fastmcp_session_id(mcp_session_id)
 
-        logger.info(
-            f"[{tool_name}] Auth from middleware: authenticated_user={authenticated_user}, auth_method={auth_method}, session_id={mcp_session_id}"
+        logger.debug(
+            f"[{tool_name}] Middleware context: user={authenticated_user}, "
+            f"method={auth_method}, session={mcp_session_id}"
         )
         return authenticated_user, auth_method, mcp_session_id
 
@@ -112,8 +113,8 @@ def _detect_oauth_version(
 
     # When OAuth 2.1 is enabled globally, ALWAYS use OAuth 2.1 for authenticated users
     if authenticated_user:
-        logger.info(
-            f"[{tool_name}] OAuth 2.1 mode: Using OAuth 2.1 for authenticated user '{authenticated_user}'"
+        logger.debug(
+            f"[{tool_name}] OAuth 2.1 selected for authenticated user '{authenticated_user}'"
         )
         return True
 
@@ -121,8 +122,8 @@ def _detect_oauth_version(
     # be available even if middleware state wasn't populated.
     try:
         if get_access_token() is not None:
-            logger.info(
-                f"[{tool_name}] OAuth 2.1 mode: Using OAuth 2.1 based on validated access token"
+            logger.debug(
+                f"[{tool_name}] OAuth 2.1 selected via validated access token"
             )
             return True
     except Exception as e:
@@ -138,8 +139,8 @@ def _detect_oauth_version(
 
     oauth_version = config.detect_oauth_version(request_params)
     use_oauth21 = oauth_version == "oauth21"
-    logger.info(
-        f"[{tool_name}] OAuth version detected: {oauth_version}, will use OAuth 2.1: {use_oauth21}"
+    logger.debug(
+        f"[{tool_name}] OAuth version detected: {oauth_version} (use_oauth21={use_oauth21})"
     )
     return use_oauth21
 
@@ -242,14 +243,26 @@ async def _authenticate_service(
         Tuple of (service, actual_user_email)
     """
     if is_service_account_enabled():
+        canonical_email = _ENV_USER_EMAIL
+        if not canonical_email:
+            raise GoogleAuthenticationError(
+                "Service account mode requires USER_GOOGLE_EMAIL to be configured."
+            )
+        if user_google_email != canonical_email:
+            logger.warning(
+                f"[{tool_name}] Service account: ignoring caller-supplied email "
+                f"'{user_google_email}', using configured USER_GOOGLE_EMAIL "
+                f"'{canonical_email}'"
+            )
         credentials = _get_service_account_credentials(
-            resolved_scopes, user_google_email
+            resolved_scopes, canonical_email
         )
         service = build(service_name, service_version, credentials=credentials)
         logger.info(
-            f"[{tool_name}] Service account: {service_name} impersonating {user_google_email}"
+            f"[{tool_name}] Authenticated {service_name} for "
+            f"{canonical_email} via service-account"
         )
-        return service, user_google_email
+        return service, canonical_email
 
     if use_oauth21:
         logger.debug(f"[{tool_name}] Using OAuth 2.1 flow")
@@ -330,7 +343,10 @@ async def get_authenticated_google_service_oauth21(
             )
 
         service = build(service_name, version, credentials=credentials)
-        logger.info(f"[{tool_name}] Authenticated {service_name} for {resolved_email}")
+        logger.info(
+            f"[{tool_name}] Authenticated {service_name} for "
+            f"{resolved_email} via oauth2.1"
+        )
         return service, resolved_email
 
     store = get_oauth21_session_store()
@@ -360,7 +376,10 @@ async def get_authenticated_google_service_oauth21(
         )
 
     service = build(service_name, version, credentials=credentials)
-    logger.info(f"[{tool_name}] Authenticated {service_name} for {user_google_email}")
+    logger.info(
+        f"[{tool_name}] Authenticated {service_name} for "
+        f"{user_google_email} via oauth2.1"
+    )
 
     return service, user_google_email
 
@@ -695,9 +714,10 @@ def require_google_service(
             try:
                 tool_name = func.__name__
 
-                # Log authentication status
-                logger.debug(
-                    f"[{tool_name}] Auth: {authenticated_user or 'none'} via {auth_method or 'none'} (session: {mcp_session_id[:8] if mcp_session_id else 'none'})"
+                # Log tool invocation with user identity for admin visibility
+                logger.info(
+                    f"[{tool_name}] {user_google_email} -> "
+                    f"{service_name}/{service_version}"
                 )
 
                 # Detect OAuth version
@@ -732,9 +752,9 @@ def require_google_service(
                 )
             except GoogleAuthenticationError as e:
                 logger.error(
-                    f"[{tool_name}] GoogleAuthenticationError during authentication. "
-                    f"Method={auth_method or 'none'}, User={authenticated_user or 'none'}, "
-                    f"Service={service_name} v{service_version}, MCPSessionID={mcp_session_id or 'none'}: {e}"
+                    f"[{tool_name}] Auth failed for {user_google_email} | "
+                    f"{service_name}/{service_version} | "
+                    f"method={auth_method or 'none'} | {e}"
                 )
                 # Re-raise the original error without wrapping it
                 raise
@@ -814,7 +834,9 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
         async def wrapper(*args, **kwargs):
             # Get authentication context early
             tool_name = func.__name__
-            authenticated_user, _, mcp_session_id = await _get_auth_context(tool_name)
+            authenticated_user, auth_method, mcp_session_id = (
+                await _get_auth_context(tool_name)
+            )
 
             # Extract user_google_email based on OAuth mode
             if is_oauth21_enabled():
@@ -825,6 +847,12 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
                 user_google_email = _extract_oauth20_user_email(
                     args, kwargs, wrapper_sig
                 )
+
+            # Log tool invocation with user identity for admin visibility
+            services_desc = ", ".join(c["service_type"] for c in service_configs)
+            logger.info(
+                f"[{tool_name}] {user_google_email} -> [{services_desc}]"
+            )
 
             # Authenticate all services
             with ExitStack() as stack:
@@ -879,7 +907,9 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
 
                     except GoogleAuthenticationError as e:
                         logger.error(
-                            f"[{tool_name}] GoogleAuthenticationError for service '{service_type}' (user: {user_google_email}): {e}"
+                            f"[{tool_name}] Auth failed for {user_google_email} | "
+                            f"{service_name}/{service_version} | "
+                            f"method={auth_method or 'none'} | {e}"
                         )
                         # Re-raise the original error without wrapping it
                         raise

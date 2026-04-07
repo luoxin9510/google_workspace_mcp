@@ -70,6 +70,9 @@ class EnhancedLogFormatter(logging.Formatter):
             "gslides.slides_tools": "[SLIDES]",
             "gtasks.tasks_tools": "[TASKS]",
             "gsearch.search_tools": "[SEARCH]",
+            "auth.service_decorator": "[TOOL]",
+            "gcontacts.contacts_tools": "[CONTACTS]",
+            "gappsscript.apps_script_tools": "[APPSCRIPT]",
         }
 
         return ascii_prefixes.get(logger_name, f"[{level_name}]")
