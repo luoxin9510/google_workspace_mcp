@@ -1155,7 +1155,7 @@ uv run main.py
 **Key Behaviors:**
 - The OAuth callback server is not started (no interactive auth needed)
 - Credentials directory permission checks are skipped
-- Caller-supplied email addresses in tool calls are ignored — the server always uses the configured `USER_GOOGLE_EMAIL`
+- **All operations impersonate the configured `USER_GOOGLE_EMAIL`** — any email addresses supplied in tool calls (e.g., `user_email` parameters) are ignored. This differs from OAuth modes where each user authenticates separately.
 - The service account key is validated at startup (checks for required fields and correct type)
 
 ### VS Code MCP Client Support
