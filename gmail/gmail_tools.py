@@ -17,9 +17,11 @@ from typing import Annotated, Optional, List, Dict, Literal, Any
 from urllib.parse import unquote, urlparse, urlunsplit
 
 import httpx
+from collections import Counter
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formataddr
+from email.utils import formataddr, getaddresses, parseaddr, parsedate_to_datetime
 
 from pydantic import Field
 from googleapiclient.errors import HttpError
@@ -2338,9 +2340,25 @@ async def get_gmail_thread_content(
             ),
         ),
     ] = "text",
-) -> str:
+    include_analysis: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, the return value is a dict with both the formatted "
+                "thread content AND structured ownership analysis (last sender, "
+                "ball-in-court verdict, per-sender message counts, participants). "
+                "Defaults to False, in which case the existing string return shape "
+                "is preserved."
+            ),
+        ),
+    ] = False,
+) -> "str | Dict[str, Any]":
     """
     Retrieves the complete content of a Gmail conversation thread, including all messages.
+
+    Optionally also returns structured ownership analysis so a caller can
+    determine who sent the last message and who owes whom a response without
+    re-parsing the formatted string or making a second tool call.
 
     Args:
         thread_id (str): The unique ID of the Gmail thread to retrieve.
@@ -2349,12 +2367,44 @@ async def get_gmail_thread_content(
             "text" (default) returns plaintext (HTML converted to text as fallback).
             "html" returns the raw HTML body as-is without conversion.
             "raw" fetches each message's full raw MIME content and returns the base64url-decoded body.
+        include_analysis (bool): When True, returns a dict containing both the
+            formatted thread content and structured ownership analysis. When
+            False (default), returns the formatted content string (existing
+            behavior, unchanged).
 
     Returns:
-        str: The complete thread content with all messages formatted for reading.
+        str: When `include_analysis=False` (default). The complete thread
+        content with all messages formatted for reading.
+
+        Dict[str, Any]: When `include_analysis=True`. A dict with two keys:
+            "content" (str): Same formatted string as when the flag is False.
+            "analysis" (dict): Structured ownership metadata with keys
+                `thread_id`, `thread_subject`, `last_sender` (raw From header,
+                e.g. `"Alex Smith" <alex@example.com>`), `last_sender_email`
+                (normalized form of last_sender, safe to index into
+                `message_count_by_sender`), `last_timestamp` (ISO-8601,
+                UTC-aware), `ball_in_court_of`, `message_count_by_sender`
+                (normalized-email → int), `participants` (sorted list of
+                normalized emails), `excluded_drafts` (int), `message_count`
+                (int).
+
+                `ball_in_court_of` values name WHOSE COURT the ball is in:
+                  "user"  = authenticated user owes the next reply (external
+                            party sent last)
+                  "them"  = other party owes the next reply (user sent last)
+                  None    = unresolvable (all drafts, self-only thread, or
+                            malformed From header)
+
+        Ownership analysis details: plus-addressing is normalized
+        (alex+foo@domain.com is treated as alex@domain.com); drafts are
+        excluded from the last-message determination; malformed Date headers
+        fall back to Gmail's internalDate. See `_analyze_thread_ownership_impl`
+        for full semantics. Known limitation: `user_google_email` is a single
+        address; aliases are not tracked.
     """
     logger.info(
-        f"[get_gmail_thread_content] Invoked. Thread ID: '{thread_id}', Email: '{user_google_email}'"
+        f"[get_gmail_thread_content] Invoked. Thread ID: '{thread_id}', "
+        f"Email: '{user_google_email}', include_analysis={include_analysis}"
     )
 
     # Fetch the complete thread with all messages
@@ -2373,12 +2423,247 @@ async def get_gmail_thread_content(
             service, message_ids, log_prefix="get_gmail_thread_content"
         )
 
-    return _format_thread_content(
+    content = _format_thread_content(
         thread_response,
         thread_id,
         body_format=body_format,
         raw_contents=raw_contents,
     )
+
+    if not include_analysis:
+        return content
+
+    analysis = _analyze_thread_ownership_impl(thread_response, user_google_email)
+    return {"content": content, "analysis": analysis}
+
+
+def _normalize_email(address: str) -> str:
+    """Lowercase an email address and strip plus-addressing so that
+    e.g. 'Alex <alex+foo@scopestack.io>' normalizes to 'alex@scopestack.io'.
+
+    This is the key primitive for 'is this message from Alex?' checks — plus
+    addresses are Alex, not a third party.
+    """
+    _name, addr = parseaddr(address or "")
+    addr = addr.lower().strip()
+    if not addr or "@" not in addr:
+        return addr
+    local, _, domain = addr.partition("@")
+    local = local.split("+", 1)[0]
+    return f"{local}@{domain}"
+
+
+def _parse_date_header(
+    date_str: str, internal_date_ms: str | int | None
+) -> tuple[Optional[str], Optional[datetime]]:
+    """Parse a Date header to a timezone-aware datetime. Fall back to
+    internalDate (Unix ms as string) when the RFC822 Date header is malformed
+    or missing.
+
+    CRITICAL: the returned datetime is ALWAYS timezone-aware (UTC). Mixing
+    naive and aware datetimes in comparisons raises TypeError at runtime,
+    which matters here because a single thread can contain both well-formed
+    Date headers (with tz) and malformed ones (falling back to internalDate,
+    which is aware UTC). Coerce naive → UTC at parse time so downstream
+    callers can `>` / `<` the results freely.
+
+    Returns (iso_string, datetime) or (None, None) if both sources fail.
+    """
+    if date_str:
+        try:
+            dt = parsedate_to_datetime(date_str)
+            # parsedate_to_datetime returns a naive datetime when the header
+            # has no timezone offset (e.g., "Mon, 14 Apr 2026 09:00:00"),
+            # otherwise an aware datetime with the header's offset (e.g.,
+            # -0400). Normalize to UTC either way so the returned isoformat
+            # string always carries a UTC offset, matching the documented
+            # "ALWAYS UTC-aware" contract.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.isoformat(), dt
+        except (TypeError, ValueError) as e:
+            logger.debug(
+                "Could not parse Date header %r; falling back to internalDate: %s",
+                date_str,
+                e,
+            )
+
+    if internal_date_ms is not None:
+        try:
+            ms = int(internal_date_ms)
+            dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+            return dt.isoformat(), dt
+        except (TypeError, ValueError) as e:
+            logger.debug(
+                "Could not convert internalDate %r to timestamp: %s",
+                internal_date_ms,
+                e,
+            )
+
+    return None, None
+
+
+def _analyze_thread_ownership_impl(
+    thread_response: dict,
+    user_google_email: str,
+) -> Dict[str, Any]:
+    """Pure analysis of a Gmail thread API response. Takes the response from
+    users().threads().get(format='full') and returns structured ownership
+    metadata. Kept separate from the @server.tool wrapper so tests can call
+    it with fabricated thread data."""
+    messages = thread_response.get("messages", []) or []
+    thread_id = thread_response.get("id", "")
+
+    if not messages:
+        return {
+            "thread_id": thread_id,
+            "thread_subject": None,
+            "last_sender": None,
+            "last_sender_email": None,
+            "last_timestamp": None,
+            "ball_in_court_of": None,
+            "message_count_by_sender": {},
+            "participants": [],
+            "excluded_drafts": 0,
+            "message_count": 0,
+        }
+
+    normalized_user = _normalize_email(user_google_email)
+
+    # Thread subject: first message's Subject header
+    first_headers = {
+        h["name"]: h["value"]
+        for h in messages[0].get("payload", {}).get("headers", [])
+    }
+    thread_subject = first_headers.get("Subject") or None
+
+    sender_counter: Counter[str] = Counter()
+    participants: set[str] = set()
+    excluded_drafts = 0
+
+    last_non_draft = None  # (datetime, message_dict, headers_dict)
+
+    for message in messages:
+        label_ids = message.get("labelIds", []) or []
+        is_draft = "DRAFT" in label_ids
+
+        headers = {
+            h["name"]: h["value"]
+            for h in message.get("payload", {}).get("headers", [])
+        }
+
+        from_addr = headers.get("From", "")
+        _name, from_email = parseaddr(from_addr)
+        from_norm = _normalize_email(from_email) if from_email else ""
+
+        # Count participants from From/To/Cc (normalized). Use getaddresses
+        # for RFC-correct parsing — a naive `split(",")` would mis-parse
+        # quoted display names with embedded commas like:
+        #   "Doe, John" <john@example.com>, vendor@example.com
+        # getaddresses handles all three headers in one pass and returns
+        # (display_name, address) tuples.
+        header_values = [
+            headers.get(hdr, "") for hdr in ("From", "To", "Cc")
+        ]
+        for _n, addr in getaddresses([v for v in header_values if v]):
+            norm = _normalize_email(addr) if addr else ""
+            # `_normalize_email` returns the input unchanged when there's no
+            # "@", so a malformed header like "No Email Here" would otherwise
+            # leak a free-text token into participants. Gate on "@" presence
+            # so the structured payload only contains real email addresses.
+            if norm and "@" in norm:
+                participants.add(norm)
+
+        if is_draft:
+            excluded_drafts += 1
+            continue
+
+        # Same "@"-presence guard on the sender counter — a malformed From
+        # header shouldn't create a phantom sender entry.
+        if from_norm and "@" in from_norm:
+            sender_counter[from_norm] += 1
+
+        _iso, dt = _parse_date_header(
+            headers.get("Date", ""), message.get("internalDate")
+        )
+        if dt is not None:
+            if last_non_draft is None or dt >= last_non_draft[0]:
+                # >= rather than > so that, on identical timestamps, the
+                # later-iterated message wins. Gmail returns thread messages
+                # in chronological order, so later-in-list == later-in-time
+                # when the parsed datetimes tie (e.g., both fall back to the
+                # same internalDate second).
+                last_non_draft = (dt, message, headers)
+
+    if last_non_draft is None:
+        # All messages were drafts — no sent state to reason about
+        return {
+            "thread_id": thread_id,
+            "thread_subject": thread_subject,
+            "last_sender": None,
+            "last_sender_email": None,
+            "last_timestamp": None,
+            "ball_in_court_of": None,
+            "message_count_by_sender": dict(sender_counter),
+            "participants": sorted(participants),
+            "excluded_drafts": excluded_drafts,
+            "message_count": len(messages),
+        }
+
+    last_dt, _last_message, last_headers = last_non_draft
+    last_sender_raw = last_headers.get("From", "")
+    _n, last_sender_email = parseaddr(last_sender_raw)
+    last_sender_norm = _normalize_email(last_sender_email) if last_sender_email else ""
+
+    # Ball-in-court logic — the value names WHOSE COURT the ball is in:
+    # - "user" = ball is in the authenticated user's court (someone ELSE
+    #   sent last, so user owes the next reply)
+    # - "them" = ball is in the other party's court (user sent last, so
+    #   they owe the next reply)
+    # - None  = unresolvable (self-only thread with no external party, or
+    #           malformed From header, or normalized_user empty)
+    #
+    # Compute the external-party check from sender_counter (which is already
+    # draft-filtered) rather than from `participants`. `participants`
+    # intentionally includes draft recipients for the downstream payload
+    # (users want to see the full address set, drafts included), but for
+    # ball-in-court we only care about parties who have actually sent. A
+    # thread with only (user → self non-draft) + (user → external draft)
+    # should resolve as a self-only thread, not as "ball is on them".
+    sender_parties = set(sender_counter.keys())
+    external_senders = sender_parties - {normalized_user} if normalized_user else sender_parties
+    if not normalized_user or "@" not in last_sender_norm:
+        # Either we have no user identity to compare against, or the last
+        # message's From header couldn't be parsed into a real email address
+        # (e.g., just a display name). Can't make a reliable claim.
+        ball_in_court_of = None
+    elif not external_senders:
+        # Self-only thread (user → user, e.g., forward-to-self): no external
+        # party has SENT anything non-draft. Even if a draft names an
+        # external recipient, the ball isn't meaningfully on them.
+        ball_in_court_of = None
+    elif last_sender_norm == normalized_user:
+        ball_in_court_of = "them"
+    else:
+        ball_in_court_of = "user"
+
+    return {
+        "thread_id": thread_id,
+        "thread_subject": thread_subject,
+        "last_sender": last_sender_raw or None,
+        # Normalized form of last_sender, safe to index into
+        # message_count_by_sender and participants. Useful for programmatic
+        # consumers doing e.g. analysis["message_count_by_sender"][analysis["last_sender_email"]].
+        "last_sender_email": last_sender_norm or None,
+        "last_timestamp": last_dt.isoformat(),
+        "ball_in_court_of": ball_in_court_of,
+        "message_count_by_sender": dict(sender_counter),
+        "participants": sorted(participants),
+        "excluded_drafts": excluded_drafts,
+        "message_count": len(messages),
+    }
 
 
 @server.tool()
