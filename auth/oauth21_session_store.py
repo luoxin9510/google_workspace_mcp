@@ -14,13 +14,31 @@ from typing import Dict, Optional, Any, Tuple, Callable, IO
 from threading import RLock
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from fastmcp.server.auth import AccessToken
 from google.oauth2.credentials import Credentials
 from auth.oauth_config import is_external_oauth21_provider
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_file_exclusive(file_handle: IO[str]) -> None:
+    """Acquire an exclusive lock when supported by the platform."""
+    if fcntl is None:
+        return
+    fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(file_handle: IO[str]) -> None:
+    """Release a file lock when supported by the platform."""
+    if fcntl is None:
+        return
+    fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
 
 
 def _get_default_oauth_state_file() -> str:
@@ -230,6 +248,15 @@ class OAuth21SessionStore:
         state_dir = os.path.dirname(self._oauth_state_file)
         if state_dir:
             os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(state_dir, 0o700)
+            except OSError:
+                logger.debug("Failed to update OAuth state directory permissions")
+        if os.path.exists(self._oauth_state_file):
+            try:
+                os.chmod(self._oauth_state_file, 0o600)
+            except OSError:
+                logger.debug("Failed to update OAuth state file permissions")
 
     def _serialize_oauth_state_entry(
         self, state_info: Dict[str, Any]
@@ -256,9 +283,14 @@ class OAuth21SessionStore:
         for field_name in ("created_at", "expires_at"):
             raw_value = deserialized.get(field_name)
             if isinstance(raw_value, str):
-                deserialized[field_name] = datetime.fromisoformat(
-                    raw_value.replace("Z", "+00:00")
-                )
+                try:
+                    parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    deserialized[field_name] = None
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                deserialized[field_name] = parsed
         return deserialized
 
     def _remove_expired_oauth_states_from_dict(
@@ -319,6 +351,10 @@ class OAuth21SessionStore:
         json.dump(serialized, file_handle, indent=2, sort_keys=True)
         file_handle.flush()
         os.fsync(file_handle.fileno())
+        try:
+            os.chmod(self._oauth_state_file, 0o600)
+        except OSError:
+            logger.debug("Failed to update OAuth state file permissions")
 
     def _update_shared_oauth_states(
         self,
@@ -327,7 +363,11 @@ class OAuth21SessionStore:
         self._ensure_oauth_state_directory()
         fd = os.open(self._oauth_state_file, os.O_RDWR | os.O_CREAT, 0o600)
         with os.fdopen(fd, "r+", encoding="utf-8") as file_handle:
-            fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                os.chmod(self._oauth_state_file, 0o600)
+            except OSError:
+                logger.debug("Failed to update OAuth state file permissions")
+            _lock_file_exclusive(file_handle)
             try:
                 oauth_states, cleaned_expired = (
                     self._load_oauth_states_from_file_handle(file_handle)
@@ -337,12 +377,14 @@ class OAuth21SessionStore:
                     self._write_oauth_states_to_file_handle(file_handle, oauth_states)
                 return result, oauth_states
             finally:
-                fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+                _unlock_file(file_handle)
 
     def _persist_oauth_state_to_shared_store(
         self, state: str, state_info: Dict[str, Any]
     ) -> None:
-        def mutator(oauth_states):
+        def mutator(
+            oauth_states: Dict[str, Dict[str, Any]],
+        ) -> Tuple[Optional[Dict[str, Any]], bool]:
             oauth_states[state] = state_info
             return None, True
 
@@ -351,7 +393,9 @@ class OAuth21SessionStore:
     def _pop_oauth_state_from_shared_store(
         self, state: str
     ) -> Optional[Dict[str, Any]]:
-        def mutator(oauth_states):
+        def mutator(
+            oauth_states: Dict[str, Dict[str, Any]],
+        ) -> Tuple[Optional[Dict[str, Any]], bool]:
             state_info = oauth_states.pop(state, None)
             return state_info, state_info is not None
 
@@ -360,13 +404,21 @@ class OAuth21SessionStore:
 
     def _consume_latest_oauth_state_from_shared_store(
         self,
+        session_id: Optional[str] = None,
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
-        def mutator(oauth_states):
-            if not oauth_states:
+        def mutator(
+            oauth_states: Dict[str, Dict[str, Any]],
+        ) -> Tuple[Optional[Tuple[str, Dict[str, Any]]], bool]:
+            matching_states = [
+                state
+                for state, state_info in oauth_states.items()
+                if state_info.get("session_id") == session_id
+            ]
+            if not matching_states:
                 return None, False
 
             latest_state = max(
-                oauth_states.keys(),
+                matching_states,
                 key=lambda s: oauth_states[s].get(
                     "created_at",
                     datetime.min.replace(tzinfo=timezone.utc),
@@ -471,19 +523,28 @@ class OAuth21SessionStore:
             )
             return state_info
 
-    def consume_latest_oauth_state(self) -> Optional[Dict[str, Any]]:
+    def consume_latest_oauth_state(
+        self, initiating_session_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Consume and return the most recently created OAuth state.
 
         Used as a fallback when the callback URL is missing the state parameter
         (e.g. in stdio mode with certain Google OAuth prompt types).
 
+        Args:
+            initiating_session_id: Optional session identifier that initiated the
+                OAuth flow. When provided, only matching shared-store states are
+                considered during fallback lookup.
+
         Returns:
             State metadata dict, or None if no states are stored.
         """
         with self._lock:
             self._cleanup_expired_oauth_states_locked()
-            shared_state = self._consume_latest_oauth_state_from_shared_store()
+            shared_state = self._consume_latest_oauth_state_from_shared_store(
+                initiating_session_id
+            )
             if not shared_state:
                 self._oauth_states.clear()
                 return None
