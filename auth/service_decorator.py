@@ -1,3 +1,4 @@
+import gc
 import inspect
 import json
 import logging
@@ -792,6 +793,10 @@ def require_google_service(
             finally:
                 if service:
                     service.close()
+                # googleapiclient's Resource tree holds circular refs that
+                # service.close() doesn't break. Without this sweep, memory
+                # grows on every call.
+                gc.collect()
 
         # Set the wrapper's signature to the one without 'service'
         wrapper.__signature__ = wrapper_sig
