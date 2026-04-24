@@ -2500,7 +2500,7 @@ async def update_tab_from_markdown(
     Args:
         user_google_email: Google account to act as
         document_id: Target Google Doc ID
-        tab_id: Target tab ID (obtain from insert_doc_tab or list_doc_tabs)
+        tab_id: Target tab ID (obtain from insert_doc_tab or inspect_doc_structure)
         markdown_text: Markdown source to render into the tab
         replace_existing: If True, delete existing tab body before inserting
 

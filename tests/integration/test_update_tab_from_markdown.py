@@ -71,6 +71,14 @@ def docs_service():
     if not doc_id:
         pytest.skip("INTEGRATION_TEST_DOC_ID not set")
 
+    # The tool calls below resolve os.environ["USER_GOOGLE_EMAIL"] - skip
+    # here rather than KeyError deep inside the async function.
+    if not os.environ.get("USER_GOOGLE_EMAIL"):
+        pytest.skip(
+            "USER_GOOGLE_EMAIL not set. Export the Google account email the "
+            "MCP tools should act as, then re-run."
+        )
+
     creds = _load_credentials()
     if not creds:
         pytest.skip(

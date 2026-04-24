@@ -1,8 +1,14 @@
 """Markdown to Google Docs API batchUpdate request converter.
 
-Parses CommonMark+GFM markdown and emits a list of Docs API request dicts
-that, when applied in order, render the markdown into a document or a
-specific tab within a document.
+Parses CommonMark markdown via markdown-it-py (commonmark preset) and emits
+a list of Docs API request dicts that, when applied in order, render the
+markdown into a document or a specific tab within a document.
+
+Supported constructs - headings H1-H6, paragraphs with inline bold/italic/
+code/links, ordered and unordered lists, fenced code blocks, blockquotes,
+and horizontal rules. GFM-only features (tables, strikethrough, task lists,
+autolinks) are not enabled; extend the parser config below if they become
+needed.
 
 Primary entry point - markdown_to_docs_requests(markdown_text, tab_id=None).
 """
@@ -126,11 +132,15 @@ def _emit_requests(tokens, requests, tab_id, start_index):
         if tok.type == "fence":
             content = tok.content
             start_idx = cursor[0]
+            # Ensure exactly one trailing newline to end the code paragraph.
+            # The universal spacer paragraph below supplies the visual gap;
+            # adding a second newline here would leave fenced blocks with one
+            # more blank line than other top-level blocks.
             text = content if content.endswith("\n") else content + "\n"
-            text += "\n"  # trailing blank line to separate from next block
             requests.append(_build_insert_text(cursor[0], text, tab_id))
             cursor[0] += len(text)
-            code_end = cursor[0] - 1  # exclude the trailing blank newline
+            # Style the code characters but not the paragraph-ending newline.
+            code_end = cursor[0] - 1
             requests.append(
                 _build_text_style(
                     start_idx,

@@ -109,11 +109,7 @@ def test_inline_code_emits_monospace_style():
     styles = [r for r in requests if "updateTextStyle" in r]
     assert len(styles) == 1
     ts = styles[0]["updateTextStyle"]["textStyle"]
-    assert ts.get("weightedFontFamily", {}).get("fontFamily") in (
-        "Courier New",
-        "Roboto Mono",
-        "Consolas",
-    )
+    assert ts.get("weightedFontFamily", {}).get("fontFamily") == "Courier New"
 
 
 def test_link_emits_link_style():
@@ -169,17 +165,15 @@ def test_fenced_code_block_emits_monospace_style():
     requests = markdown_to_docs_requests(md)
     inserts = [r for r in requests if "insertText" in r]
     styles = [r for r in requests if "updateTextStyle" in r]
-    # Two inserts - the fenced block content plus the trailing spacer paragraph
+    # Two inserts - the fenced block content plus the trailing spacer paragraph.
+    # The code insert carries exactly one trailing newline (the paragraph
+    # terminator); the spacer provides the visual gap to the next block.
     assert len(inserts) == 2
-    assert inserts[0]["insertText"]["text"] == "def foo():\n    return 42\n\n"
+    assert inserts[0]["insertText"]["text"] == "def foo():\n    return 42\n"
     assert inserts[1]["insertText"]["text"] == "\n"
     assert len(styles) >= 1
     ts = styles[0]["updateTextStyle"]["textStyle"]
-    assert ts.get("weightedFontFamily", {}).get("fontFamily") in (
-        "Courier New",
-        "Roboto Mono",
-        "Consolas",
-    )
+    assert ts.get("weightedFontFamily", {}).get("fontFamily") == "Courier New"
 
 
 def test_blockquote_emits_indent():
@@ -234,7 +228,7 @@ def test_no_tab_id_omits_tab_id_field_entirely():
 
 def test_real_blog_article_produces_reasonable_request_list():
     md_path = FIXTURE_DIR / "sample_blog_article.md"
-    md = md_path.read_text()
+    md = md_path.read_text(encoding="utf-8")
     requests = markdown_to_docs_requests(md)
     # Smoke test - we expect many insertText and several updateParagraphStyle
     inserts = [r for r in requests if "insertText" in r]
@@ -249,7 +243,7 @@ def test_real_blog_article_produces_reasonable_request_list():
 
 def test_real_blog_article_indices_are_monotonic():
     md_path = FIXTURE_DIR / "sample_blog_article.md"
-    md = md_path.read_text()
+    md = md_path.read_text(encoding="utf-8")
     requests = markdown_to_docs_requests(md)
     inserts = [r for r in requests if "insertText" in r]
     indices = [r["insertText"]["location"]["index"] for r in inserts]

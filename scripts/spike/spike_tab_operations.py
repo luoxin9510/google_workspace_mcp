@@ -41,7 +41,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 TOKEN_CACHE = pathlib.Path.home() / ".workspace-mcp" / "spike_token.json"
-TARGET_DOC_ID = "1UyL1dL6GBztnVGpLQ5H0EQ8Cfh_k6mjiRQ56MCsJnb0"  # HONOUR-HEALTH-01 A01 condition doc
+
+# Target doc for the spike. Set via env var so the script is portable -
+# any fork contributor can run it against their own scratch Google Doc.
+# Matches the env-var convention used by tests/integration/test_update_tab_from_markdown.py.
+TARGET_DOC_ID = os.environ.get("INTEGRATION_TEST_DOC_ID", "")
+if not TARGET_DOC_ID:
+    sys.exit(
+        "ERROR - set INTEGRATION_TEST_DOC_ID to a Google Doc ID the spike can "
+        "create and delete tabs on. Manually create a scratch Doc in Drive, "
+        "copy its ID from the URL, then re-run."
+    )
 SAMPLE_MD = """# Spike Test Tab
 
 This is a **spike** test verifying that the fork's extended markdown writer
