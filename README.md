@@ -137,7 +137,7 @@ This server sends no data anywhere except Google's APIs, on behalf of the authen
 - **You control the network** — deploy behind your reverse proxy, in your VPC, on your own terms
 - **No third-party services** — no intermediary servers, no token relays, no hosted backends
 - **Stateless mode** — zero disk writes for locked-down container environments
-- **Sensitive path blocking** — `.env`, `.ssh/`, `.aws/`, and credential files are blocked regardless of configuration
+- **Sensitive path blocking** — local file reads default to the managed attachment directory, and `validate_file_path()` still blocks `.env*` files plus common home-directory credential stores such as `~/.ssh/` and `~/.aws/` even if `ALLOWED_FILE_DIRS` is broadened
 
 Full dependency tree in `pyproject.toml`, pinned in `uv.lock`.
 
@@ -241,7 +241,7 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 | `WORKSPACE_MCP_PORT` | | Listening port — default `8000` |
 | `WORKSPACE_MCP_HOST` | | Bind host — default `0.0.0.0` |
 | `WORKSPACE_EXTERNAL_URL` | | External URL for reverse proxy setups |
-| `WORKSPACE_ATTACHMENT_DIR` | | Downloaded attachments dir — default `~/.workspace-mcp/attachments/` |
+| `WORKSPACE_ATTACHMENT_DIR` | | Downloaded attachments dir and default trusted local attachment directory — default `~/.workspace-mcp/attachments/` |
 | `WORKSPACE_MCP_URL` | | Remote MCP endpoint URL for CLI |
 | `ALLOWED_FILE_DIRS` | | Colon-separated allowlist for local file reads |
 | **🔑 OAuth 2.1 & Multi-User** | | |
@@ -1481,12 +1481,13 @@ The credential store automatically handles credential serialization, expiry pars
 - **Transport-Aware Callbacks**: Stdio mode starts a minimal HTTP server only for OAuth, ensuring callbacks work in all modes
 - **Production**: Use HTTPS & OAuth 2.1 and configure accordingly
 - **Scope Minimization**: Tools request only necessary permissions
-- **Local File Access Control**: Tools that read local files (e.g., attachments, `file://` uploads) are restricted to the user's home directory by default. Override this with the `ALLOWED_FILE_DIRS` environment variable:
+- **Local File Access Control**: Tools that read local files (e.g., attachments, `file://` uploads) are restricted to the managed attachment directory by default. Override this with the `ALLOWED_FILE_DIRS` environment variable if you intentionally need broader access:
   ```bash
   # Colon-separated list of directories (semicolon on Windows) from which local file reads are permitted
   export ALLOWED_FILE_DIRS="/home/user/documents:/data/shared"
   ```
-  Regardless of the allowlist, access to sensitive paths (`.env`, `.ssh/`, `.aws/`, `/etc/shadow`, credential files, etc.) is always blocked.
+  The managed attachment directory is controlled by `WORKSPACE_ATTACHMENT_DIR` and remains allowed even when `ALLOWED_FILE_DIRS` is set. Regardless of the allowlist, access to sensitive paths (`.env`, `.ssh/`, `.aws/`, `/etc/shadow`, credential files, etc.) is always blocked.
+- **Indirect Prompt Injection**: In agentic clients, email bodies, documents, and calendar events can contain malicious instructions that try to coerce the model into exfiltrating local files. Do not broaden `ALLOWED_FILE_DIRS` unless you trust the client, the model behavior, and the data sources it can read.
 
 ---
 
