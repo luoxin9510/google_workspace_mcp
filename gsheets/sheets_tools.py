@@ -2164,9 +2164,12 @@ async def move_sheet_rows(
     destination_sheet: str,
 ) -> str:
     """
-    Moves rows from one sheet to another within the same spreadsheet. Reads the
-    row data from the source sheet, appends it to the destination sheet, then
-    deletes the original rows. Row numbers are 1-based (matching the spreadsheet UI).
+    Moves rows from one sheet to another within the same spreadsheet. The move
+    is performed atomically in a single batchUpdate (copyPaste followed by
+    deleteDimension), so either both operations succeed or neither does — no
+    risk of duplicated data on partial failure. Formulas, data types, and
+    formatting are preserved (unlike a values.get/append round-trip).
+    Row numbers are 1-based (matching the spreadsheet UI).
 
     Args:
         user_google_email (str): The user's Google email address. Required.
@@ -2194,74 +2197,64 @@ async def move_sheet_rows(
     if source_sheet == destination_sheet:
         raise UserInputError("source_sheet and destination_sheet must be different.")
 
-    source_range = f"'{source_sheet}'!{start_row}:{end_row}"
-    result = await asyncio.to_thread(
-        service.spreadsheets()
-        .values()
-        .get(spreadsheetId=spreadsheet_id, range=source_range)
-        .execute
-    )
-
-    values = result.get("values", [])
-    if not values:
-        raise UserInputError(
-            f"No data found in {source_sheet} rows {start_row}-{end_row}."
-        )
-
-    dest_range = f"'{destination_sheet}'!A1"
-    await asyncio.to_thread(
-        service.spreadsheets()
-        .values()
-        .append(
-            spreadsheetId=spreadsheet_id,
-            range=dest_range,
-            valueInputOption="RAW",
-            body={"values": values},
-        )
-        .execute
-    )
-
     spreadsheet = await asyncio.to_thread(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
-            fields="sheets(properties(sheetId,title))",
+            fields="sheets(properties(sheetId,title,gridProperties))",
         )
         .execute
     )
+    sheets = spreadsheet.get("sheets", [])
+    src = _select_sheet(sheets, source_sheet)
+    dst = _select_sheet(sheets, destination_sheet)
+    src_id = src["properties"]["sheetId"]
+    dst_id = dst["properties"]["sheetId"]
+    dst_row_count = dst["properties"].get("gridProperties", {}).get("rowCount", 0)
 
-    sheet = _select_sheet(spreadsheet.get("sheets", []), source_sheet)
-    sheet_id = sheet["properties"]["sheetId"]
+    num_rows = end_row - start_row + 1
 
-    delete_body = {
-        "requests": [
-            {
-                "deleteDimension": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "startIndex": start_row - 1,
-                        "endIndex": end_row,
-                    }
+    requests = [
+        {
+            "copyPaste": {
+                "source": {
+                    "sheetId": src_id,
+                    "startRowIndex": start_row - 1,
+                    "endRowIndex": end_row,
+                },
+                "destination": {
+                    "sheetId": dst_id,
+                    "startRowIndex": dst_row_count,
+                    "endRowIndex": dst_row_count + num_rows,
+                },
+                "pasteType": "PASTE_NORMAL",
+            }
+        },
+        {
+            "deleteDimension": {
+                "range": {
+                    "sheetId": src_id,
+                    "dimension": "ROWS",
+                    "startIndex": start_row - 1,
+                    "endIndex": end_row,
                 }
             }
-        ]
-    }
+        },
+    ]
 
     await asyncio.to_thread(
         service.spreadsheets()
-        .batchUpdate(spreadsheetId=spreadsheet_id, body=delete_body)
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
         .execute
     )
 
-    num_moved = len(values)
     text_output = (
-        f"Successfully moved {num_moved} row(s) from '{source_sheet}' "
+        f"Successfully moved {num_rows} row(s) from '{source_sheet}' "
         f"(rows {start_row}-{end_row}) to '{destination_sheet}' "
         f"in spreadsheet {spreadsheet_id} for {user_google_email}."
     )
 
-    logger.info(f"[move_sheet_rows] Moved {num_moved} rows for {user_google_email}")
+    logger.info(f"[move_sheet_rows] Moved {num_rows} rows for {user_google_email}")
     return text_output
 
 
