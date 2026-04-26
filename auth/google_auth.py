@@ -947,11 +947,10 @@ def get_credentials(
                 found_user_email = user_google_email
             else:
                 logger.info(
-                    f"[get_credentials] Single-user mode: no credentials for {user_google_email}, falling back to any"
+                    "[get_credentials] Single-user mode: no credentials for requested "
+                    f"user {user_google_email}; not falling back to another user"
                 )
-                credentials, found_user_email = _find_any_credentials(
-                    credentials_base_dir
-                )
+                return None
         else:
             credentials, found_user_email = _find_any_credentials(credentials_base_dir)
         if not credentials:
