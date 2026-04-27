@@ -358,7 +358,7 @@ def _is_pkce_verifier_not_needed_error(error: Exception) -> bool:
     )
 
 
-def _determine_oauth_prompt(
+async def _determine_oauth_prompt(
     user_google_email: Optional[str],
     required_scopes: List[str],
     session_id: Optional[str] = None,
@@ -413,8 +413,8 @@ def _determine_oauth_prompt(
     # Fall back to credential file store in stateful mode.
     if not existing_credentials and not is_stateless_mode():
         try:
-            existing_credentials = get_credential_store().get_credential(
-                normalized_email
+            existing_credentials = await asyncio.to_thread(
+                get_credential_store().get_credential, normalized_email
             )
         except Exception as e:
             logger.debug(f"Could not read credential store for prompt choice: {e}")
@@ -436,7 +436,7 @@ def _determine_oauth_prompt(
             return "select_account"
         if existing_credentials.refresh_token:
             try:
-                existing_credentials.refresh(Request())
+                await asyncio.to_thread(existing_credentials.refresh, Request())
                 logger.info(
                     f"[start_auth_flow] Using prompt='select_account' for re-auth of {normalized_email}."
                 )
@@ -520,7 +520,7 @@ async def start_auth_flow(
                 f"Could not retrieve FastMCP session ID for state binding: {e}"
             )
 
-        prompt_type = _determine_oauth_prompt(
+        prompt_type = await _determine_oauth_prompt(
             user_google_email=user_google_email,
             required_scopes=current_scopes,
             session_id=session_id,
@@ -580,7 +580,7 @@ async def start_auth_flow(
         raise Exception(error_text)
 
 
-def handle_auth_callback(
+async def handle_auth_callback(
     scopes: List[str],
     authorization_response: str,
     redirect_uri: str,
@@ -674,7 +674,9 @@ def handle_auth_callback(
         # Exchange the authorization code for credentials
         # Note: fetch_token will use the redirect_uri configured in the flow
         try:
-            flow.fetch_token(authorization_response=authorization_response)
+            await asyncio.to_thread(
+                flow.fetch_token, authorization_response=authorization_response
+            )
             credentials = flow.credentials
         except Exception as exc:
             if _is_pkce_verifier_not_needed_error(exc):
@@ -710,7 +712,7 @@ def handle_auth_callback(
             )
 
         # Get user info to determine user_id (using email here)
-        user_info = get_user_info(credentials)
+        user_info = await asyncio.to_thread(get_user_info, credentials)
         if not user_info or "email" not in user_info:
             logger.error("Could not retrieve user email from Google.")
             raise ValueError("Failed to get user email for identification.")
@@ -718,7 +720,10 @@ def handle_auth_callback(
         user_google_email = user_info["email"]
         logger.info(f"Identified user_google_email: {user_google_email}")
 
-        credential_store = get_credential_store()
+        stateless_mode = is_stateless_mode()
+        credential_store = None
+        if not stateless_mode:
+            credential_store = get_credential_store()
         if not credentials.refresh_token:
             fallback_refresh_token = None
 
@@ -737,10 +742,10 @@ def handle_auth_callback(
                         f"Could not check session store for existing refresh token: {e}"
                     )
 
-            if not fallback_refresh_token and not is_stateless_mode():
+            if not fallback_refresh_token and not stateless_mode:
                 try:
-                    existing_credentials = credential_store.get_credential(
-                        user_google_email
+                    existing_credentials = await asyncio.to_thread(
+                        credential_store.get_credential, user_google_email
                     )
                     if existing_credentials and existing_credentials.refresh_token:
                         fallback_refresh_token = existing_credentials.refresh_token
@@ -769,8 +774,20 @@ def handle_auth_callback(
                     "OAuth callback did not include a refresh token and no previous refresh token was available to preserve."
                 )
 
-        # Save the credentials
-        credential_store.store_credential(user_google_email, credentials)
+        if not stateless_mode:
+            # Save the credentials before updating session state so both stores stay in sync.
+            stored = await asyncio.to_thread(
+                credential_store.store_credential, user_google_email, credentials
+            )
+            if not stored:
+                logger.warning(
+                    "Credential store rejected updated credentials for %s; aborting session persistence.",
+                    user_google_email,
+                )
+                raise RuntimeError(
+                    f"Failed to persist credentials for {user_google_email}; "
+                    "session state was not updated."
+                )
 
         # Always save to OAuth21SessionStore for centralized management
         store.store_session(
@@ -807,7 +824,9 @@ def get_credentials(
     """
     Retrieves stored credentials, prioritizing OAuth 2.1 store, then session, then file. Refreshes if necessary.
     If credentials are loaded from file and a session_id is present, they are cached in the session.
-    In single-user mode, bypasses session mapping and uses any available credentials.
+    In single-user mode, bypasses session mapping. If user_google_email is provided, only credentials
+    for that email are used and the function returns None instead of falling back to any available
+    credentials. If user_google_email is not provided, any available credentials may be used.
 
     Args:
         user_google_email: Optional user's Google email.
@@ -850,29 +869,47 @@ def get_credentials(
                             # Update stored credentials
                             user_email = store.get_user_by_mcp_session(session_id)
                             if user_email:
-                                store.store_session(
-                                    user_email=user_email,
-                                    access_token=credentials.token,
-                                    refresh_token=credentials.refresh_token,
-                                    token_uri=credentials.token_uri,
-                                    client_id=credentials.client_id,
-                                    client_secret=credentials.client_secret,
-                                    scopes=credentials.scopes,
-                                    expiry=credentials.expiry,
-                                    mcp_session_id=session_id,
-                                    issuer="https://accounts.google.com",
-                                )
                                 # Persist to file so rotated refresh tokens survive restarts
+                                persist_succeeded = True
                                 if not is_stateless_mode():
                                     try:
                                         credential_store = get_credential_store()
-                                        credential_store.store_credential(
-                                            user_email, credentials
+                                        persist_succeeded = (
+                                            credential_store.store_credential(
+                                                user_email, credentials
+                                            )
                                         )
+                                        if not persist_succeeded:
+                                            logger.warning(
+                                                "[get_credentials] Credential store rejected refreshed OAuth 2.1 credentials for user %s; skipping session update.",
+                                                user_email,
+                                            )
                                     except Exception as persist_error:
+                                        persist_succeeded = False
                                         logger.warning(
                                             f"[get_credentials] Failed to persist refreshed OAuth 2.1 credentials for user {user_email}: {persist_error}"
                                         )
+
+                                if not persist_succeeded and not is_stateless_mode():
+                                    logger.warning(
+                                        "[get_credentials] Refreshed OAuth 2.1 credentials for user %s were not persisted; discarding in-memory refresh result.",
+                                        user_email,
+                                    )
+                                    return None
+
+                                if persist_succeeded or is_stateless_mode():
+                                    store.store_session(
+                                        user_email=user_email,
+                                        access_token=credentials.token,
+                                        refresh_token=credentials.refresh_token,
+                                        token_uri=credentials.token_uri,
+                                        client_id=credentials.client_id,
+                                        client_secret=credentials.client_secret,
+                                        scopes=credentials.scopes,
+                                        expiry=credentials.expiry,
+                                        mcp_session_id=session_id,
+                                        issuer="https://accounts.google.com",
+                                    )
                         except Exception as e:
                             logger.error(
                                 f"[get_credentials] Failed to refresh OAuth 2.1 credentials: {e}"
@@ -912,11 +949,10 @@ def get_credentials(
                 found_user_email = user_google_email
             else:
                 logger.info(
-                    f"[get_credentials] Single-user mode: no credentials for {user_google_email}, falling back to any"
+                    "[get_credentials] Single-user mode: no credentials for requested "
+                    f"user {user_google_email}; not falling back to another user"
                 )
-                credentials, found_user_email = _find_any_credentials(
-                    credentials_base_dir
-                )
+                return None
         else:
             credentials, found_user_email = _find_any_credentials(credentials_base_dir)
         if not credentials:
@@ -1003,31 +1039,57 @@ def get_credentials(
             )
 
             # Save refreshed credentials (skip file save in stateless mode)
+            persist_succeeded = True
             if user_google_email:  # Always save to credential store if email is known
                 if not is_stateless_mode():
-                    credential_store = get_credential_store()
-                    credential_store.store_credential(user_google_email, credentials)
+                    try:
+                        credential_store = get_credential_store()
+                        persist_succeeded = credential_store.store_credential(
+                            user_google_email, credentials
+                        )
+                    except Exception as persist_error:
+                        persist_succeeded = False
+                        logger.warning(
+                            "[get_credentials] Failed to persist refreshed credentials for user %s: %s",
+                            user_google_email,
+                            persist_error,
+                        )
+
+                    if not persist_succeeded:
+                        logger.warning(
+                            "[get_credentials] Credential store rejected refreshed credentials for user %s; skipping session update.",
+                            user_google_email,
+                        )
                 else:
                     logger.info(
                         f"Skipping credential file save in stateless mode for {user_google_email}"
                     )
 
-                # Also update OAuth21SessionStore
-                store = get_oauth21_session_store()
-                store.store_session(
-                    user_email=user_google_email,
-                    access_token=credentials.token,
-                    refresh_token=credentials.refresh_token,
-                    token_uri=credentials.token_uri,
-                    client_id=credentials.client_id,
-                    client_secret=credentials.client_secret,
-                    scopes=credentials.scopes,
-                    expiry=credentials.expiry,
-                    mcp_session_id=session_id,
-                    issuer="https://accounts.google.com",  # Add issuer for Google tokens
-                )
+                if not persist_succeeded and not is_stateless_mode():
+                    logger.warning(
+                        "[get_credentials] Refreshed credentials for user %s were not persisted; discarding in-memory refresh result.",
+                        user_google_email,
+                    )
+                    return None
 
-            if session_id:  # Update session cache if it was the source or is active
+                if persist_succeeded or is_stateless_mode():
+                    # Also update OAuth21SessionStore
+                    store = get_oauth21_session_store()
+                    store.store_session(
+                        user_email=user_google_email,
+                        access_token=credentials.token,
+                        refresh_token=credentials.refresh_token,
+                        token_uri=credentials.token_uri,
+                        client_id=credentials.client_id,
+                        client_secret=credentials.client_secret,
+                        scopes=credentials.scopes,
+                        expiry=credentials.expiry,
+                        mcp_session_id=session_id,
+                        issuer="https://accounts.google.com",  # Add issuer for Google tokens
+                    )
+
+            if session_id and (persist_succeeded or is_stateless_mode()):
+                # Update session cache if it was the source or is active
                 save_credentials_to_session(session_id, credentials)
         except RefreshError as e:
             logger.warning(
