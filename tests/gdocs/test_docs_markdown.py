@@ -471,7 +471,7 @@ class TestSmartChips:
             },
         }
         md = convert_doc_to_markdown(doc)
-        assert "https://example.com" in md
+        assert md == "https://example.com\n"
 
     def test_date_chip_display_text(self):
         doc = {

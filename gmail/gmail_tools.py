@@ -562,11 +562,44 @@ def _format_attachment_error(
             detail = (
                 "local file access is limited to the server's permitted directories, "
                 f"so '{file_path}' could not be read. Files on external mounts such as "
-                "/run/media may be blocked; move the file into an allowed directory or "
-                "set ALLOWED_FILE_DIRS."
+                "/run/media may be blocked; move the file into the managed attachment "
+                "directory or another allowed directory, or set ALLOWED_FILE_DIRS."
             )
 
     return f"{label}: {detail}"
+
+
+def _format_base64_content_block(urlsafe_b64_data: str) -> List[str]:
+    """
+    Convert Gmail's URL-safe base64 attachment data to standard base64 and
+    format it as a labeled block of result lines.
+
+    The Gmail API returns attachment bodies in URL-safe base64 (per RFC 4648).
+    ``draft_gmail_message`` and most stdlib consumers expect standard base64
+    (``base64.b64decode``). Converting here keeps the response self-contained
+    so a caller can pass the bytes straight back into the draft flow without
+    knowing about the alphabet difference.
+
+    Args:
+        urlsafe_b64_data: URL-safe base64 string as returned by Gmail.
+
+    Returns:
+        A list of strings to extend onto ``result_lines``. On failure to
+        decode, returns a single warning line instead of raising.
+    """
+    try:
+        raw_bytes = base64.urlsafe_b64decode(urlsafe_b64_data)
+        standard_b64 = base64.b64encode(raw_bytes).decode("ascii")
+        return [
+            f"\n📦 Base64 content ({len(standard_b64)} chars, standard base64):",
+            standard_b64,
+        ]
+    except (binascii.Error, ValueError) as e:
+        logger.warning(
+            f"[get_gmail_attachment_content] Failed to convert attachment "
+            f"to standard base64: {e}"
+        )
+        return [f"\n⚠️ Could not include base64 content: {e}"]
 
 
 def _extract_attachments(payload: dict) -> List[Dict[str, Any]]:
@@ -697,6 +730,10 @@ async def _fetch_thread_reply_context(
 
     message_contexts = []
     for msg in messages:
+        # Skip trashed messages so auto-derived In-Reply-To never points at a
+        # message that Gmail's UI cannot render
+        if "TRASH" in msg.get("labelIds", []):
+            continue
         payload = msg.get("payload", {})
         headers = _extract_headers(payload, header_names)
         context = {
@@ -1552,11 +1589,23 @@ async def get_gmail_messages_content_batch(
                         )
                         body_label = "BODY"
 
+                    attachments = _extract_attachments(payload)
+
                     msg_output = "\n".join(
                         _format_message_header_lines(headers, message_id=mid)
                     )
                     msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid)}\n"
                     msg_output += f"\n--- {body_label} ---\n{body_data}\n"
+
+                    if attachments:
+                        msg_output += "\n--- ATTACHMENTS ---\n"
+                        for i, att in enumerate(attachments, 1):
+                            size_kb = att["size"] / 1024
+                            msg_output += (
+                                f"{i}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
+                                f"   Attachment ID: {att['attachmentId']}\n"
+                                f"   Use get_gmail_attachment_content(message_id='{mid}', attachment_id='{att['attachmentId']}') to download\n"
+                            )
 
                     output_messages.append(msg_output)
 
@@ -1577,6 +1626,7 @@ async def get_gmail_attachment_content(
     message_id: str,
     attachment_id: str,
     user_google_email: str,
+    return_base64: bool = False,
 ) -> str:
     """
     Downloads an email attachment and saves it to local disk.
@@ -1589,9 +1639,20 @@ async def get_gmail_attachment_content(
         message_id (str): The ID of the Gmail message containing the attachment.
         attachment_id (str): The ID of the attachment to download.
         user_google_email (str): The user's Google email address. Required.
+        return_base64 (bool): When True, includes the full attachment as a
+            standard base64 string in the response (in addition to any file
+            path or download URL). Useful for sandboxed clients that cannot
+            reach localhost download URLs or the MCP server's local file
+            paths (e.g. containerized agents with network allowlists). The
+            returned base64 uses the standard alphabet, so it can be passed
+            directly to tools like ``draft_gmail_message`` that expect
+            standard (not URL-safe) base64. Default False preserves the
+            existing behavior and response size.
 
     Returns:
-        str: Attachment metadata with either a local file path or download URL.
+        str: Attachment metadata with either a local file path or download URL,
+            optionally followed by a base64 content block when
+            ``return_base64=True``.
     """
     logger.info(
         f"[get_gmail_attachment_content] Invoked. Message ID: '{message_id}', Email: '{user_google_email}'"
@@ -1635,6 +1696,8 @@ async def get_gmail_attachment_content(
             f"{base64_data[:100]}...",
             "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch.",
         ]
+        if return_base64 and base64_data:
+            result_lines.extend(_format_base64_content_block(base64_data))
         logger.info(
             f"[get_gmail_attachment_content] Successfully downloaded {size_kb:.1f} KB attachment (stateless mode)"
         )
@@ -1722,6 +1785,9 @@ async def get_gmail_attachment_content(
             "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch."
         )
 
+        if return_base64 and base64_data:
+            result_lines.extend(_format_base64_content_block(base64_data))
+
         logger.info(
             f"[get_gmail_attachment_content] Successfully saved {size_kb:.1f} KB attachment to {result.path}"
         )
@@ -1743,6 +1809,8 @@ async def get_gmail_attachment_content(
             f"\nError: {str(e)}",
             "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch.",
         ]
+        if return_base64 and base64_data:
+            result_lines.extend(_format_base64_content_block(base64_data))
         return "\n".join(result_lines)
 
 
@@ -2257,10 +2325,9 @@ def _format_thread_content(
 
     # Process each message in the thread
     for i, message in enumerate(messages, 1):
+        payload = message.get("payload", {})
         # Extract headers
-        headers = {
-            h["name"]: h["value"] for h in message.get("payload", {}).get("headers", [])
-        }
+        headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
 
         sender = headers.get("From", "(unknown sender)")
         date = headers.get("Date", "(unknown date)")
@@ -2276,7 +2343,6 @@ def _format_thread_content(
             body_label = "RAW MIME"
         else:
             # Extract both text and HTML bodies
-            payload = message.get("payload", {})
             bodies = _extract_message_bodies(payload)
             text_body = bodies.get("text", "")
             html_body = bodies.get("html", "")
@@ -2286,6 +2352,10 @@ def _format_thread_content(
                 text_body, html_body, body_format=body_format
             )
             body_label = "BODY"
+
+        # Extract attachment metadata for this message
+        attachments = _extract_attachments(payload)
+        message_id = message.get("id", "")
 
         # Add message to content
         content_lines.extend(
@@ -2318,6 +2388,17 @@ def _format_thread_content(
             )
         else:
             content_lines.extend(["", body_data, ""])
+
+        if attachments:
+            content_lines.append("--- ATTACHMENTS ---")
+            for j, att in enumerate(attachments, 1):
+                size_kb = att["size"] / 1024
+                content_lines.append(
+                    f"{j}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
+                    f"   Attachment ID: {att['attachmentId']}\n"
+                    f"   Use get_gmail_attachment_content(message_id='{message_id}', attachment_id='{att['attachmentId']}') to download"
+                )
+            content_lines.append("")
 
     return "\n".join(content_lines)
 

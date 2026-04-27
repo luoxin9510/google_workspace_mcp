@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workspace-mcp"
-version = "1.19.0"
+version = "1.20.0"
 description = "Comprehensive, highly performant Google Workspace Streamable HTTP & SSE MCP Server for Calendar, Gmail, Docs, Sheets, Slides & Drive"
 readme = "README.md"
 keywords = [ "mcp", "google", "workspace", "llm", "ai", "claude", "model", "context", "protocol", "server"]
@@ -12,7 +12,7 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
  "fastapi>=0.115.12",
- "fastmcp>=3.2.0",
+ "fastmcp>=3.2.4",
  "google-api-python-client>=2.168.0",
  "google-auth-httplib2>=0.2.0",
  "google-auth-oauthlib>=1.2.2",
@@ -23,8 +23,9 @@ dependencies = [
  "pyyaml>=6.0.2",
  "cryptography>=45.0.0",
  "defusedxml>=0.7.1",
- "pypdf>=6.8.0",
+ "pypdf>=6.10.2",
  "pytz>=2026.1.post1",
+ "markdown-it-py>=3.0.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -61,6 +62,9 @@ workspace-mcp = "main:main"
 workspace-cli = "core.cli:main"
 
 [project.optional-dependencies]
+gcs = [
+    "google-cloud-storage>=2.18.0",
+]
 disk = [
     "py-key-value-aio[filetree]>=0.3.0",
 ]
@@ -120,6 +124,9 @@ exclude = ["tests*", "docs*", "build", "dist"]
 [tool.pytest.ini_options]
 addopts = "--ignore=tests/gappsscript/manual_test.py"
 pythonpath = ["."]
+markers = [
+    "integration: marks tests as requiring real external services (deselect with '-m \"not integration\"')",
+]
 
 [tool.setuptools.package-data]
 core = ["tool_tiers.yaml"]
