@@ -761,13 +761,9 @@ def main():
                             try:
                                 await asyncio.wait_for(http_task, timeout=5.0)
                             except asyncio.TimeoutError:
-                                # wait_for already cancelled the task; drain it.
-                                try:
-                                    await http_task
-                                except (asyncio.CancelledError, Exception):
-                                    pass
+                                logger.warning("HTTP sidecar did not exit within 5s; cancelled")
                             except asyncio.CancelledError:
-                                pass
+                                raise
                             except Exception as exc:
                                 logger.debug("HTTP sidecar ended with exception: %s", exc)
 
