@@ -723,8 +723,10 @@ def main():
 
                 try:
                     http_port = int(_cli_port)
-                except ValueError:
-                    print(f"Error: invalid WORKSPACE_MCP_HTTP_PORT '{_cli_port}'.", file=sys.stderr)
+                    if not 1 <= http_port <= 65535:
+                        raise ValueError("must be between 1 and 65535")
+                except ValueError as exc:
+                    print(f"Error: invalid WORKSPACE_MCP_HTTP_PORT '{_cli_port}': {exc}.", file=sys.stderr)
                     sys.exit(1)
 
                 # Bind sidecar to loopback only — auth provider is not initialized
