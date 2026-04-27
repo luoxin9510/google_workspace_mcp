@@ -96,7 +96,7 @@ logger = logging.getLogger(__name__)
 configure_file_logging()
 
 # Single source of truth: service name -> module path.
-# SERVICE_NAMES and VALID_SERVICES are derived from this mapping.
+# VALID_SERVICES is derived from this mapping.
 SERVICE_MODULES = {
     "gmail": "gmail.gmail_tools",
     "drive": "gdrive.drive_tools",
@@ -111,7 +111,6 @@ SERVICE_MODULES = {
     "search": "gsearch.search_tools",
     "appscript": "gappsscript.apps_script_tools",
 }
-SERVICE_NAMES = tuple(SERVICE_MODULES)
 VALID_SERVICES = frozenset(SERVICE_MODULES)
 
 
@@ -270,6 +269,10 @@ def main():
     _cli_has_permissions = args.permissions is not None
     _cli_has_read_only = args.read_only
 
+    def _exit_with_env_error(name: str, value: str, expected: str) -> None:
+        print(f"Error: invalid {name} {value!r}; expected {expected}.", file=sys.stderr)
+        sys.exit(1)
+
     if args.tools is None and not _cli_has_permissions:
         _env_tools = os.getenv("WORKSPACE_MCP_TOOLS", "").strip()
         if _env_tools:
@@ -279,16 +282,14 @@ def main():
                 logger.warning("Ignoring invalid services from WORKSPACE_MCP_TOOLS: %s", _invalid)
             _parsed = [t for t in _raw if t in VALID_SERVICES]
             if _raw and not _parsed:
-                print("Error: WORKSPACE_MCP_TOOLS contains only invalid services.", file=sys.stderr)
-                sys.exit(1)
+                _exit_with_env_error("WORKSPACE_MCP_TOOLS", _env_tools, "comma-separated valid service names")
             if _parsed:
                 args.tools = _parsed
     if args.tool_tier is None:
         _env_tier = os.getenv("WORKSPACE_MCP_TOOL_TIER", "").strip().lower()
         if _env_tier:
             if _env_tier not in {"core", "extended", "complete"}:
-                print(f"Error: invalid WORKSPACE_MCP_TOOL_TIER '{_env_tier}'.", file=sys.stderr)
-                sys.exit(1)
+                _exit_with_env_error("WORKSPACE_MCP_TOOL_TIER", _env_tier, "core, extended, or complete")
             args.tool_tier = _env_tier
     if not args.read_only and not _cli_has_permissions:
         _env_ro = os.getenv("WORKSPACE_MCP_READ_ONLY", "").strip().lower()
@@ -296,8 +297,7 @@ def main():
             if _env_ro in {"true", "1", "yes"}:
                 args.read_only = True
             elif _env_ro not in {"false", "0", "no"}:
-                print(f"Error: invalid WORKSPACE_MCP_READ_ONLY '{_env_ro}'.", file=sys.stderr)
-                sys.exit(1)
+                _exit_with_env_error("WORKSPACE_MCP_READ_ONLY", _env_ro, "true/1/yes or false/0/no")
     if args.permissions is None and not _cli_has_read_only and not _cli_has_tools:
         _env_perms = os.getenv("WORKSPACE_MCP_PERMISSIONS", "").strip()
         if _env_perms:
@@ -306,8 +306,7 @@ def main():
         _env_transport = os.getenv("WORKSPACE_MCP_TRANSPORT", "").strip().lower()
         if _env_transport:
             if _env_transport not in {"stdio", "streamable-http"}:
-                print(f"Error: invalid WORKSPACE_MCP_TRANSPORT '{_env_transport}'.", file=sys.stderr)
-                sys.exit(1)
+                _exit_with_env_error("WORKSPACE_MCP_TRANSPORT", _env_transport, "stdio or streamable-http")
             args.transport = _env_transport
         else:
             args.transport = "stdio"
