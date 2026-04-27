@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import sys
+from functools import partial
 from importlib import metadata, import_module
 from dotenv import load_dotenv
 
@@ -311,17 +312,19 @@ def main():
         else:
             args.transport = "stdio"
 
-    # Validate mutually exclusive flags
+    # Validate mutually exclusive flags (settings can come from CLI flags or WORKSPACE_MCP_* env vars).
     if args.permissions and args.read_only:
         print(
-            "Error: --permissions and --read-only are mutually exclusive. "
+            "Error: --permissions and --read-only are mutually exclusive "
+            "(via CLI flag or WORKSPACE_MCP_PERMISSIONS / WORKSPACE_MCP_READ_ONLY env var). "
             "Use service:readonly within --permissions instead.",
             file=sys.stderr,
         )
         sys.exit(1)
     if args.permissions and args.tools is not None:
         print(
-            "Error: --permissions and --tools cannot be combined. "
+            "Error: --permissions and --tools cannot be combined "
+            "(via CLI flag or WORKSPACE_MCP_PERMISSIONS / WORKSPACE_MCP_TOOLS env var). "
             "Select services via --permissions (optionally with --tool-tier).",
             file=sys.stderr,
         )
@@ -404,7 +407,7 @@ def main():
     safe_print("")
 
     # Import tool modules to register them with the MCP server via decorators.
-    tool_imports = {svc: (lambda m=mod: import_module(m)) for svc, mod in SERVICE_MODULES.items()}
+    tool_imports = {svc: partial(import_module, mod) for svc, mod in SERVICE_MODULES.items()}
 
     tool_icons = {
         "gmail": "📧",
