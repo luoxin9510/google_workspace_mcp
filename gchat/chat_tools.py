@@ -282,9 +282,7 @@ async def list_spaces(
     if filter_param:
         request_params["filter"] = filter_param
 
-    response = await asyncio.to_thread(
-        service.spaces().list(**request_params).execute
-    )
+    response = await asyncio.to_thread(service.spaces().list(**request_params).execute)
 
     spaces = response.get("spaces", [])
     if not spaces:
