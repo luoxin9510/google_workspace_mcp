@@ -42,6 +42,9 @@ CHAT_READONLY_SCOPE = "https://www.googleapis.com/auth/chat.messages.readonly"
 CHAT_WRITE_SCOPE = "https://www.googleapis.com/auth/chat.messages"
 CHAT_SPACES_SCOPE = "https://www.googleapis.com/auth/chat.spaces"
 CHAT_SPACES_READONLY_SCOPE = "https://www.googleapis.com/auth/chat.spaces.readonly"
+CHAT_MEMBERSHIPS_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/chat.memberships.readonly"
+)
 
 # Google Sheets API scopes
 SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"

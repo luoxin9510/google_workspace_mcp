@@ -4,16 +4,18 @@ Google Chat MCP Tools
 This module provides MCP tools for interacting with Google Chat API.
 """
 
+import asyncio
 import base64
 import logging
-import asyncio
 import ssl
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 from googleapiclient.errors import HttpError
 
 # Auth & server utilities
+from auth.google_auth import get_authenticated_google_service
+from auth.scopes import CHAT_MEMBERSHIPS_READONLY_SCOPE, CONTACTS_READONLY_SCOPE
 from auth.service_decorator import require_google_service, require_multiple_services
 from core.server import server
 from core.utils import TransientNetworkError, handle_http_errors
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 # In-memory cache for user ID → display name (bounded to avoid unbounded growth)
 _SENDER_CACHE_MAX_SIZE = 256
 _sender_name_cache: Dict[str, str] = {}
+_PEOPLE_BATCH_GET_MAX_RESOURCE_NAMES = 200
 _SEARCH_MESSAGES_MAX_CONCURRENT_SPACE_FETCHES = 1
 _SEARCH_MESSAGES_SSL_RETRIES = 3
 _SEARCH_MESSAGES_RETRY_BASE_DELAY_SECONDS = 1
@@ -87,6 +90,123 @@ async def _resolve_sender(people_service, sender_obj: dict) -> str:
     return user_id
 
 
+def _person_display_and_email(person: dict, fallback: str) -> Tuple[str, Optional[str]]:
+    names = person.get("names", [])
+    display_name = names[0].get("displayName") if names else None
+    emails = person.get("emailAddresses", [])
+    email = emails[0].get("value") if emails else None
+    return display_name or email or fallback, email
+
+
+async def _resolve_people_batch(people_service, user_ids: List[str]) -> Dict[str, dict]:
+    """Resolve Chat user IDs to People profile details in one request."""
+    if not people_service or not user_ids:
+        return {}
+
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    resolved = {}
+    for start in range(0, len(unique_user_ids), _PEOPLE_BATCH_GET_MAX_RESOURCE_NAMES):
+        user_id_batch = unique_user_ids[
+            start : start + _PEOPLE_BATCH_GET_MAX_RESOURCE_NAMES
+        ]
+        resource_names = [
+            user_id.replace("users/", "people/", 1) for user_id in user_id_batch
+        ]
+
+        try:
+            response = await asyncio.to_thread(
+                people_service.people()
+                .getBatchGet(
+                    resourceNames=resource_names,
+                    personFields="names,emailAddresses",
+                )
+                .execute
+            )
+        except HttpError as e:
+            logger.debug(f"People API batch lookup failed for DM members: {e}")
+            continue
+        except Exception as e:
+            logger.debug(f"Unexpected error resolving DM members: {e}")
+            continue
+
+        for item in response.get("responses", []):
+            person = item.get("person", {})
+            resource_name = person.get("resourceName")
+            if not resource_name:
+                continue
+            user_id = resource_name.replace("people/", "users/", 1)
+            display_name, email = _person_display_and_email(person, user_id)
+            resolved[user_id] = {"display_name": display_name, "email": email}
+
+    return resolved
+
+
+async def _resolve_dm_space_names(
+    chat_service,
+    people_service,
+    spaces: List[dict],
+    user_google_email: str,
+) -> Dict[str, str]:
+    """Resolve direct-message space names to the other participant's name."""
+    dm_spaces = [
+        space
+        for space in spaces
+        if space.get("spaceType") == "DIRECT_MESSAGE" and space.get("name")
+    ]
+    if not dm_spaces:
+        return {}
+
+    memberships_by_space: Dict[str, List[dict]] = {}
+    user_ids = []
+    for space in dm_spaces:
+        space_id = space["name"]
+        try:
+            response = await asyncio.to_thread(
+                chat_service.spaces().members().list(parent=space_id).execute
+            )
+        except HttpError as e:
+            logger.debug(f"Chat memberships lookup failed for {space_id}: {e}")
+            continue
+        except Exception as e:
+            logger.debug(f"Unexpected error listing DM members for {space_id}: {e}")
+            continue
+
+        memberships = response.get("memberships", [])
+        memberships_by_space[space_id] = memberships
+        for membership in memberships:
+            member = membership.get("member", {})
+            user_id = member.get("name")
+            if user_id:
+                user_ids.append(user_id)
+
+    people_by_user_id = await _resolve_people_batch(people_service, user_ids)
+    current_user_email = user_google_email.lower()
+    resolved_names = {}
+
+    for space_id, memberships in memberships_by_space.items():
+        candidates = []
+        for membership in memberships:
+            member = membership.get("member", {})
+            user_id = member.get("name")
+            if not user_id:
+                continue
+
+            person = people_by_user_id.get(user_id, {})
+            email = person.get("email")
+            if email and email.lower() == current_user_email:
+                continue
+
+            display_name = (
+                person.get("display_name") or member.get("displayName") or user_id
+            )
+            candidates.append(display_name)
+
+        if candidates:
+            resolved_names[space_id] = ", ".join(candidates)
+
+    return resolved_names
+
+
 async def _execute_chat_request(
     request_factory,
     *,
@@ -141,6 +261,7 @@ async def list_spaces(
     user_google_email: str,
     page_size: int = 100,
     space_type: str = "all",  # "all", "room", "dm"
+    resolve_dm_names: bool = False,
 ) -> str:
     """
     Lists Google Chat spaces (rooms and direct messages) accessible to the user.
@@ -161,17 +282,50 @@ async def list_spaces(
     if filter_param:
         request_params["filter"] = filter_param
 
-    response = await asyncio.to_thread(service.spaces().list(**request_params).execute)
+    response = await asyncio.to_thread(
+        service.spaces().list(**request_params).execute
+    )
 
     spaces = response.get("spaces", [])
     if not spaces:
         return f"No Chat spaces found for type '{space_type}'."
+
+    dm_names = {}
+    has_dm_spaces = any(space.get("spaceType") == "DIRECT_MESSAGE" for space in spaces)
+    if resolve_dm_names and has_dm_spaces:
+        membership_chat_service = None
+        people_service = None
+        try:
+            membership_chat_service, _ = await get_authenticated_google_service(
+                "chat",
+                "v1",
+                "list_spaces",
+                user_google_email,
+                [CHAT_MEMBERSHIPS_READONLY_SCOPE, CONTACTS_READONLY_SCOPE],
+            )
+            people_service, _ = await get_authenticated_google_service(
+                "people",
+                "v1",
+                "list_spaces",
+                user_google_email,
+                [CONTACTS_READONLY_SCOPE],
+            )
+            dm_names = await _resolve_dm_space_names(
+                membership_chat_service, people_service, spaces, user_google_email
+            )
+        finally:
+            if membership_chat_service:
+                membership_chat_service.close()
+            if people_service:
+                people_service.close()
 
     output = [f"Found {len(spaces)} Chat spaces (type: {space_type}):"]
     for space in spaces:
         space_name = space.get("displayName", "Unnamed Space")
         space_id = space.get("name", "")
         space_type_actual = space.get("spaceType", "UNKNOWN")
+        if space_type_actual == "DIRECT_MESSAGE" and space_id in dm_names:
+            space_name = f"{dm_names[space_id]} (DM)"
         output.append(f"- {space_name} (ID: {space_id}, Type: {space_type_actual})")
 
     return "\n".join(output)
