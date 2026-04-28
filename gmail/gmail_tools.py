@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Annotated, Optional, List, Dict, Literal, Any
 from urllib.parse import unquote, urlparse, urlunsplit
 
-import httpx
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formataddr
+
+import httpx
 
 from pydantic import Field
 from googleapiclient.errors import HttpError
@@ -47,6 +48,7 @@ from auth.scopes import (
     GMAIL_MODIFY_SCOPE,
     GMAIL_LABELS_SCOPE,
 )
+from gmail.gmail_helpers import _analyze_thread_ownership_impl
 
 logger = logging.getLogger(__name__)
 
@@ -2419,9 +2421,25 @@ async def get_gmail_thread_content(
             ),
         ),
     ] = "text",
-) -> str:
+    include_analysis: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, the return value is a dict with both the formatted "
+                "thread content AND structured ownership analysis (last sender, "
+                "ball-in-court verdict, per-sender message counts, participants). "
+                "Defaults to False, in which case the existing string return shape "
+                "is preserved."
+            ),
+        ),
+    ] = False,
+) -> "str | Dict[str, Any]":
     """
     Retrieves the complete content of a Gmail conversation thread, including all messages.
+
+    Optionally also returns structured ownership analysis so a caller can
+    determine who sent the last message and who owes whom a response without
+    re-parsing the formatted string or making a second tool call.
 
     Args:
         thread_id (str): The unique ID of the Gmail thread to retrieve.
@@ -2430,12 +2448,22 @@ async def get_gmail_thread_content(
             "text" (default) returns plaintext (HTML converted to text as fallback).
             "html" returns the raw HTML body as-is without conversion.
             "raw" fetches each message's full raw MIME content and returns the base64url-decoded body.
+        include_analysis (bool): When True, returns a dict containing both the
+            formatted thread content and structured ownership analysis. When
+            False (default), returns the formatted content string (existing
+            behavior, unchanged).
 
     Returns:
-        str: The complete thread content with all messages formatted for reading.
+        str: When `include_analysis=False` (default). The complete thread
+        content with all messages formatted for reading.
+
+        Dict[str, Any]: When `include_analysis=True`. A dict with keys
+            "content" (str) and "analysis" (dict). See
+            `_analyze_thread_ownership_impl` for the analysis schema.
     """
     logger.info(
-        f"[get_gmail_thread_content] Invoked. Thread ID: '{thread_id}', Email: '{user_google_email}'"
+        f"[get_gmail_thread_content] Invoked. Thread ID: '{thread_id}', "
+        f"Email: '{user_google_email}', include_analysis={include_analysis}"
     )
 
     # Fetch the complete thread with all messages
@@ -2454,12 +2482,18 @@ async def get_gmail_thread_content(
             service, message_ids, log_prefix="get_gmail_thread_content"
         )
 
-    return _format_thread_content(
+    content = _format_thread_content(
         thread_response,
         thread_id,
         body_format=body_format,
         raw_contents=raw_contents,
     )
+
+    if not include_analysis:
+        return content
+
+    analysis = _analyze_thread_ownership_impl(thread_response, user_google_email)
+    return {"content": content, "analysis": analysis}
 
 
 @server.tool()
