@@ -49,7 +49,7 @@
 <td align="center">
 <b>🔌 Connect</b><br>
 <sub>
-<a href="#one-click-claude-desktop-install-claude-desktop-only-stdio-single-user">1-Click Install</a> · <a href="#connect-to-claude-desktop">Claude Desktop</a><br>
+<a href="#quick-start--connect-claude-to-google-workspace">Quick Start</a> · <a href="#connect-to-claude-desktop">Claude Desktop</a><br>
 <a href="#claude-code-mcp-client-support">Claude Code</a> · <a href="#vs-code-mcp-client-support">VS Code</a> · <a href="#connect-to-lm-studio">LM Studio</a>
 </sub>
 </td>
@@ -284,15 +284,9 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 
 ---
 
-### One-Click Claude Desktop Install
+### Quick Start — Connect Claude to Google Workspace
 
-> `.mcpb` bundles server, manifest & dependency metadata — download → double-click → done. No terminal, no JSON editing. Requires Claude Desktop **1.0.0** or later.
-> Note: MCPB was formerly called DXT; the `dxt` CLI, `.dxt` files, and `@anthropic-ai/dxt` package have been renamed to `mcpb`, `.mcpb`, and `@anthropic-ai/mcpb`.
-
-1. **Download** the latest `.mcpb` bundle from [Releases](https://github.com/taylorwilsdon/google_workspace_mcp/releases)
-2. **Install** — double-click the file, Claude Desktop prompts to install
-3. **Configure** — Settings → Extensions → Google Workspace MCP, paste your OAuth credentials
-4. **Use it** — start a new Claude chat and call any Google Workspace tool
+The recommended setup is to run an instance and connect Claude to it via a **Connector**. Full instructions at **[workspacemcp.com/quick-start](https://workspacemcp.com/quick-start)**.
 
 <div align="center">
   <video width="832" src="https://github.com/user-attachments/assets/83cca4b3-5e94-448b-acb3-6e3a27341d3a"></video>
@@ -422,7 +416,7 @@ export GOOGLE_PSE_ENGINE_ID=\
 
 ### Start the Server
 
-> **📌 Transport Mode Guidance**: Use **streamable HTTP mode** (`--transport streamable-http`) for all modern MCP clients including Claude Code, VS Code MCP, and MCP Inspector. Stdio mode is only for clients with incomplete MCP specification support. For deployments, prefer OAuth 2.1 with stateless mode (`MCP_ENABLE_OAUTH21=true`, `WORKSPACE_MCP_STATELESS_MODE=true`) unless you need local attachment or credential storage.
+> **📌 Transport Mode Guidance**: Use **streamable HTTP mode** (`--transport streamable-http`) for all modern MCP clients including Claude Code, VS Code MCP, and MCP Inspector. For Claude Desktop, run an instance and connect via a [Connector](https://workspacemcp.com/quick-start). Stdio mode is a legacy fallback. For deployments, prefer OAuth 2.1 with stateless mode (`MCP_ENABLE_OAUTH21=true`, `WORKSPACE_MCP_STATELESS_MODE=true`) unless you need local attachment or credential storage.
 
 <details open>
 <summary>▶ <b>Launch Commands</b> <sub><sup>← Choose your startup mode</sup></sub></summary>
@@ -964,19 +958,14 @@ Saved files expire after 1 hour and are cleaned up automatically.
 
 ### Connect to Claude Desktop
 
-The server supports two transport modes:
+The recommended way to use Google Workspace MCP with Claude Desktop is to run a server instance and connect Claude to it via a **Connector**. This provides proper OAuth flow, multi-user support, and the best experience.
 
-#### Stdio Mode (Legacy - For Clients with Incomplete MCP Support)
+See the **[Quick Start Guide](https://workspacemcp.com/quick-start)** for setup instructions.
 
-> **⚠️ Important**: Stdio mode is a **legacy fallback** for clients that don't properly implement the MCP specification with OAuth 2.1 and streamable HTTP support. **Claude Code and other modern MCP clients should use streamable HTTP mode** (`--transport streamable-http`) for proper OAuth flow and multi-user support.
+<details>
+<summary>📝 <b>Legacy: Manual stdio configuration</b> <sub><sup>← For clients without Connector support</sup></sub></summary>
 
-In general, you should use the one-click MCPB bundle for Claude Desktop.
-If you are unable to for some reason, you can configure it manually via `claude_desktop_config.json`
-
-**Manual Claude Configuration (Alternative)**
-
-<details open>
-<summary>📝 <b>Claude Desktop JSON Config</b> <sub><sup>← Click for manual setup instructions</sup></sub></summary>
+> **⚠️ Note**: Stdio mode is a legacy fallback for clients that don't support Connectors. Prefer the Connector-based approach above.
 
 1. Open Claude Desktop Settings → Developer → Edit Config
    - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
