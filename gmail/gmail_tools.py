@@ -1945,7 +1945,10 @@ async def send_gmail_message(
         in_reply_to (Optional[str]): Optional RFC Message-ID of the message being replied to (e.g., '<message123@gmail.com>').
         references (Optional[str]): Optional chain of RFC Message-IDs for proper threading (e.g., '<msg1@gmail.com> <msg2@gmail.com>').
         include_signature (bool): Whether to append Gmail signature HTML from send-as settings.
-            If unavailable (e.g., missing gmail.settings.basic scope), the email is still sent without a signature.
+            When include_signature is true and Gmail signature retrieval fails for benign reasons
+            (e.g., missing gmail.settings.basic scope), the send proceeds without a signature.
+            Non-benign failures such as quota/rate-limit or API errors raise ToolError and abort
+            the send.
 
     Returns:
         str: Confirmation message with the sent email's message ID.
@@ -2193,7 +2196,10 @@ async def draft_gmail_message(
               - 'filename' (required): Name of the file
               - 'mime_type' (optional): MIME type (defaults to 'application/octet-stream')
         include_signature (bool): Whether to append Gmail signature HTML from send-as settings.
-            If unavailable (e.g., missing gmail.settings.basic scope), the draft is still created without signature.
+            When include_signature is true and Gmail signature retrieval fails for benign reasons
+            (e.g., missing gmail.settings.basic scope), the draft proceeds without a signature.
+            Non-benign failures such as quota/rate-limit or API errors raise ToolError and abort
+            the draft.
         quote_original (bool): Whether to include the original message as a quoted reply.
             Requires thread_id to be provided. When enabled, fetches the original message
             and appends it below the signature. Defaults to False.
