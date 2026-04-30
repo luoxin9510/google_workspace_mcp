@@ -131,6 +131,9 @@ def has_required_scopes(available_scopes, required_scopes):
 # Base OAuth scopes required for user identification
 BASE_SCOPES = [USERINFO_EMAIL_SCOPE, USERINFO_PROFILE_SCOPE, OPENID_SCOPE]
 
+# Minimal scopes required to accept an MCP bearer token at the protocol layer.
+PROTOCOL_AUTH_SCOPES = [USERINFO_EMAIL_SCOPE, OPENID_SCOPE]
+
 # Service-specific scope groups
 DOCS_SCOPES = [
     DOCS_READONLY_SCOPE,

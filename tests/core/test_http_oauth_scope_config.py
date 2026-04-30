@@ -5,7 +5,7 @@ import pytest
 import core.server as server_module
 
 
-def test_configure_server_for_http_uses_base_required_scopes(monkeypatch):
+def test_configure_server_for_http_uses_protocol_auth_required_scopes(monkeypatch):
     captured = {}
 
     class FakeGoogleProvider:
@@ -50,7 +50,7 @@ def test_configure_server_for_http_uses_base_required_scopes(monkeypatch):
 
     server_module.configure_server_for_http()
 
-    assert captured["required_scopes"] == sorted(server_module.BASE_SCOPES)
+    assert captured["required_scopes"] == sorted(server_module.PROTOCOL_AUTH_SCOPES)
     assert captured["valid_scopes"] == sorted(server_module.get_current_scopes())
     assert (
         server_module.server.auth.client_registration_options.default_scopes
