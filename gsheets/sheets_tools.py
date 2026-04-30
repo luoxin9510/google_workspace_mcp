@@ -1289,6 +1289,10 @@ async def create_sheet(
         raise UserInputError("insert_sheet_index must be a non-negative integer.")
 
     if source_sheet_name is not None:
+        source_sheet_name = source_sheet_name.strip()
+        if not source_sheet_name:
+            raise UserInputError("source_sheet_name must be a non-empty string")
+
         logger.info(
             f"[create_sheet] Duplicate invoked. Email: '{user_google_email}', "
             f"Spreadsheet: {spreadsheet_id}, Source: {source_sheet_name}"

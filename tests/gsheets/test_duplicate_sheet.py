@@ -114,6 +114,52 @@ async def test_duplicate_sheet_source_not_found():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_sheet_name", ["", "   ", "\t\n"])
+async def test_duplicate_sheet_rejects_blank_source_sheet_name(source_sheet_name):
+    service = Mock()
+
+    with pytest.raises(
+        UserInputError, match="source_sheet_name must be a non-empty string"
+    ):
+        await _call_create_sheet(
+            service, sheet_name="Copy", source_sheet_name=source_sheet_name
+        )
+
+    service.spreadsheets.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_sheet_trims_source_sheet_name():
+    service = _create_mock_service(
+        sheets_metadata={
+            "sheets": [
+                {"properties": {"sheetId": 100, "title": "Original"}},
+            ]
+        },
+        batch_update_response={
+            "replies": [
+                {
+                    "duplicateSheet": {
+                        "properties": {
+                            "sheetId": 200,
+                            "title": "Copy of Original",
+                        }
+                    }
+                }
+            ]
+        },
+    )
+
+    result = await _call_create_sheet(
+        service, sheet_name="Copy of Original", source_sheet_name="  Original  "
+    )
+
+    assert "Successfully duplicated" in result
+    assert "'Original'" in result
+    assert "'  Original  '" not in result
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("source_sheet_name", "insert_sheet_index"),
     [
