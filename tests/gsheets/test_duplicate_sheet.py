@@ -4,6 +4,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from core.server import server
+from core.tool_registry import get_tool_components
 from core.utils import UserInputError
 from gsheets.sheets_tools import create_sheet
 
@@ -29,6 +31,17 @@ async def _call_create_sheet(service, **overrides):
     }
     defaults.update(overrides)
     return await impl(**defaults)
+
+
+def test_create_sheet_schema_marks_sheet_name_optional_string():
+    components = get_tool_components(server)
+    parameters = components["create_sheet"].parameters
+
+    assert "sheet_name" not in parameters["required"]
+    assert parameters["properties"]["sheet_name"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "default": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -61,6 +74,43 @@ async def test_duplicate_sheet_basic():
     assert "'Original'" in result
     assert "'Copy of Original'" in result
     assert "(ID: 200)" in result
+    request_body = service.spreadsheets().batchUpdate.call_args.kwargs["body"]
+    assert request_body["requests"][0]["duplicateSheet"]["newSheetName"] == (
+        "Copy of Original"
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_sheet_omits_target_name_when_not_provided():
+    service = _create_mock_service(
+        sheets_metadata={
+            "sheets": [
+                {"properties": {"sheetId": 100, "title": "Original"}},
+            ]
+        },
+        batch_update_response={
+            "replies": [
+                {
+                    "duplicateSheet": {
+                        "properties": {
+                            "sheetId": 200,
+                            "title": "Copy of Original",
+                        }
+                    }
+                }
+            ]
+        },
+    )
+
+    result = await _call_create_sheet(
+        service, sheet_name=None, source_sheet_name="Original"
+    )
+
+    assert "Successfully duplicated" in result
+    assert "'Original'" in result
+    assert "'Copy of Original'" in result
+    request_body = service.spreadsheets().batchUpdate.call_args.kwargs["body"]
+    assert request_body["requests"][0]["duplicateSheet"] == {"sourceSheetId": 100}
 
 
 @pytest.mark.asyncio

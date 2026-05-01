@@ -1259,11 +1259,11 @@ async def create_sheet(
     service,
     user_google_email: str,
     spreadsheet_id: str,
-    sheet_name: str,
+    sheet_name: Optional[str] = None,
     source_sheet_name: Optional[str] = None,
     insert_sheet_index: Optional[int] = None,
 ) -> str:
-    """Creates a new sheet in the spreadsheet (user_google_email: str, spreadsheet_id: str, sheet_name: str, source_sheet_name: Optional[str] = None, insert_sheet_index: Optional[int] = None)."""
+    """Creates a new sheet or duplicates an existing sheet (user_google_email: str, spreadsheet_id: str, sheet_name: Optional[str] = None, source_sheet_name: Optional[str] = None, insert_sheet_index: Optional[int] = None)."""
     if insert_sheet_index is not None and (
         isinstance(insert_sheet_index, bool)
         or not isinstance(insert_sheet_index, int)
@@ -1291,7 +1291,9 @@ async def create_sheet(
         source_sheet = _select_sheet(sheets, source_sheet_name)
         source_sheet_id = source_sheet["properties"]["sheetId"]
 
-        dup_request = {"sourceSheetId": source_sheet_id, "newSheetName": sheet_name}
+        dup_request = {"sourceSheetId": source_sheet_id}
+        if sheet_name is not None:
+            dup_request["newSheetName"] = sheet_name
         if insert_sheet_index is not None:
             dup_request["insertSheetIndex"] = insert_sheet_index
 
@@ -1322,7 +1324,9 @@ async def create_sheet(
         f"[create_sheet] Invoked. Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}, Sheet: {sheet_name}"
     )
 
-    add_request: dict = {"properties": {"title": sheet_name}}
+    add_request: dict = {"properties": {}}
+    if sheet_name is not None:
+        add_request["properties"]["title"] = sheet_name
     if insert_sheet_index is not None:
         add_request["properties"]["index"] = insert_sheet_index
 
@@ -1334,9 +1338,11 @@ async def create_sheet(
         .execute
     )
 
-    sheet_id = response["replies"][0]["addSheet"]["properties"]["sheetId"]
+    sheet_props = response["replies"][0]["addSheet"]["properties"]
+    sheet_id = sheet_props["sheetId"]
+    created_sheet_name = sheet_props.get("title", sheet_name or "Untitled")
 
-    text_output = f"Successfully created sheet '{sheet_name}' (ID: {sheet_id}) in spreadsheet {spreadsheet_id} for {user_google_email}."
+    text_output = f"Successfully created sheet '{created_sheet_name}' (ID: {sheet_id}) in spreadsheet {spreadsheet_id} for {user_google_email}."
 
     logger.info(
         f"Successfully created sheet for {user_google_email}. Sheet ID: {sheet_id}"
