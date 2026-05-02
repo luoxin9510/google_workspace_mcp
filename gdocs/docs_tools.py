@@ -9,14 +9,23 @@ import asyncio
 import io
 import inspect
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Any, Literal, Optional, Union
+
+from typing_extensions import TypedDict
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+from mcp.types import ToolAnnotations
+
 # Auth & server utilities
 from auth.service_decorator import require_google_service, require_multiple_services
-from core.utils import extract_office_xml_text, handle_http_errors, UserInputError
+from core.utils import (
+    GOOGLE_API_WRITE_RETRIES,
+    extract_office_xml_text,
+    handle_http_errors,
+    UserInputError,
+)
 from core.server import server
 from core.comments import create_comment_tools
 
@@ -34,6 +43,7 @@ from gdocs.docs_helpers import (
     create_update_doc_tab_request,
     create_delete_doc_tab_request,
     validate_suggestions_view_mode,
+    create_update_paragraph_style_request,
 )
 
 # Import document structure and table utilities
@@ -49,6 +59,7 @@ from gdocs.docs_markdown import (
     format_comments_appendix,
     parse_drive_comments,
 )
+from gdocs.docs_markdown_writer import markdown_to_docs_requests
 from gdocs.operation_schemas import BatchDocOperations
 
 # Import operation managers for complex business logic
@@ -64,7 +75,15 @@ logger = logging.getLogger(__name__)
 HEADER_FOOTER_RUNTIME_CANARY = "docs-hf-canary-20260328b"
 
 
-@server.tool()
+@server.tool(
+    title="Search Docs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("search_docs", is_read_only=True, service_type="docs")
 @require_google_service("drive", "drive_read")
 async def search_docs(
@@ -106,7 +125,15 @@ async def search_docs(
     return "\n".join(output)
 
 
-@server.tool()
+@server.tool(
+    title="Get Doc Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("get_doc_content", is_read_only=True, service_type="docs")
 @require_multiple_services(
     [
@@ -302,7 +329,15 @@ async def get_doc_content(
     return header + body_text
 
 
-@server.tool()
+@server.tool(
+    title="List Docs in Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("list_docs_in_folder", is_read_only=True, service_type="docs")
 @require_google_service("drive", "drive_read")
 async def list_docs_in_folder(
@@ -340,7 +375,15 @@ async def list_docs_in_folder(
     return "\n".join(out)
 
 
-@server.tool()
+@server.tool(
+    title="Create Doc",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("create_doc", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def create_doc(
@@ -385,9 +428,7 @@ async def create_doc(
     if content:
         content_note = f"Initial content: {len(content)} characters inserted."
     else:
-        content_note = (
-            "Document is empty (body starts at index 1, total length 2)."
-        )
+        content_note = "Document is empty (body starts at index 1, total length 2)."
     msg = (
         f"Created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. "
         f"{content_note} "
@@ -400,7 +441,15 @@ async def create_doc(
     return msg
 
 
-@server.tool()
+@server.tool(
+    title="Modify Doc Text",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("modify_doc_text", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def modify_doc_text(
@@ -441,7 +490,9 @@ async def modify_doc_text(
     Args:
         user_google_email: User's Google email address
         document_id: ID of the document to update
-        start_index: Start position for operation (0-based)
+        start_index: Start position for operation using Docs API indices from
+            inspect_doc_structure. For the main body, 0 is also accepted as an
+            alias for the first writable position.
         end_index: End position for text replacement/formatting (if not provided with text, text is inserted)
         text: New text to insert or replace with (optional - can format existing text without changing it)
         tab_id: Optional document tab ID to target
@@ -568,7 +619,10 @@ async def modify_doc_text(
             # Text insertion
             actual_index = (
                 1
-                if start_index == 0 and not end_of_segment and segment_id is None and tab_id is None
+                if start_index == 0
+                and not end_of_segment
+                and segment_id is None
+                and tab_id is None
                 else start_index
             )
             requests.append(
@@ -670,7 +724,15 @@ async def modify_doc_text(
     return f"{operation_summary} in document {document_id}.{text_info} Link: {link}"
 
 
-@server.tool()
+@server.tool(
+    title="Find and Replace Doc",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("find_and_replace_doc", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def find_and_replace_doc(
@@ -730,7 +792,15 @@ async def find_and_replace_doc(
     return f"Replaced {replacements} occurrence(s) of '{find_text}' with '{replace_text}' in document {document_id}. Link: {link}"
 
 
-@server.tool()
+@server.tool(
+    title="Insert Doc Elements",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("insert_doc_elements", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def insert_doc_elements(
@@ -812,7 +882,15 @@ async def insert_doc_elements(
     return f"Inserted {description} at index {index} in document {document_id}. Link: {link}"
 
 
-@server.tool()
+@server.tool(
+    title="Insert Doc Image",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("insert_doc_image", service_type="docs")
 @require_multiple_services(
     [
@@ -904,7 +982,15 @@ async def insert_doc_image(
     return f"Inserted {source_description}{size_info} at index {index} in document {document_id}. Link: {link}"
 
 
-@server.tool()
+@server.tool(
+    title="Update Doc Headers Footers",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("update_doc_headers_footers", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def update_doc_headers_footers(
@@ -969,14 +1055,20 @@ async def update_doc_headers_footers(
 
     if success:
         link = f"https://docs.google.com/document/d/{document_id}/edit"
-        return (
-            f"{message}. Runtime: {HEADER_FOOTER_RUNTIME_CANARY}. Link: {link}"
-        )
+        return f"{message}. Runtime: {HEADER_FOOTER_RUNTIME_CANARY}. Link: {link}"
     else:
         return f"Error: {message}. Runtime: {HEADER_FOOTER_RUNTIME_CANARY}"
 
 
-@server.tool()
+@server.tool(
+    title="Batch Update Doc",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("batch_update_doc", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def batch_update_doc(
@@ -1077,12 +1169,37 @@ async def batch_update_doc(
       update_table_cell_style
                        - required: table_start_index (int)
                          optional: background_color, border_color, border_width,
+                                   padding_top, padding_bottom, padding_left,
+                                   padding_right (float, points),
+                                   content_alignment ("TOP"|"MIDDLE"|"BOTTOM"),
                                    row_index, column_index, row_span, column_span
                          Use inspect_doc_structure to find table_start_index from
                          table_details[].start_index. If row/column values are
                          omitted, the style is applied to the entire table.
       insert_table     - required: rows (int), columns (int)
                          optional: index (int), tab_id, segment_id, end_of_segment
+      insert_table_row - required: table_start_index (int), row_index (int)
+                         optional: insert_below (bool, default true), tab_id
+      delete_table_row - required: table_start_index (int), row_index (int)
+                         optional: tab_id
+      insert_table_column
+                       - required: table_start_index (int), column_index (int)
+                         optional: insert_right (bool, default true), tab_id
+      delete_table_column
+                       - required: table_start_index (int), column_index (int)
+                         optional: tab_id
+      merge_table_cells
+                       - required: table_start_index (int), row_index (int),
+                                   column_index (int), row_span (int), column_span (int)
+                         optional: tab_id
+      unmerge_table_cells
+                       - required: table_start_index (int), row_index (int),
+                                   column_index (int), row_span (int), column_span (int)
+                         optional: tab_id
+      update_table_column_properties
+                       - required: table_start_index (int), column_indices (list[int])
+                         optional: width (float, points), width_type
+                                   (FIXED_WIDTH|EVENLY_DISTRIBUTED), tab_id
       insert_page_break- optional: index (int), end_of_segment, tab_id
       insert_section_break
                        - optional: index (int), end_of_segment, section_type
@@ -1208,7 +1325,15 @@ async def batch_update_doc(
         return f"Error: {message}"
 
 
-@server.tool()
+@server.tool(
+    title="Inspect Doc Structure",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("inspect_doc_structure", is_read_only=True, service_type="docs")
 @require_google_service("docs", "docs_read")
 async def inspect_doc_structure(
@@ -1548,7 +1673,15 @@ def _build_segment_inspection_entries(
     return list(entries.values())
 
 
-@server.tool()
+@server.tool(
+    title="Debug Docs Runtime Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("debug_docs_runtime_info", is_read_only=True, service_type="docs")
 @require_google_service("docs", "docs_read")
 async def debug_docs_runtime_info(
@@ -1566,7 +1699,9 @@ async def debug_docs_runtime_info(
     return json.dumps(
         {
             "runtime_canary": HEADER_FOOTER_RUNTIME_CANARY,
-            "docs_tools_file": inspect.getsourcefile(inspect.getmodule(debug_docs_runtime_info)),
+            "docs_tools_file": inspect.getsourcefile(
+                inspect.getmodule(debug_docs_runtime_info)
+            ),
             "header_footer_manager_file": inspect.getsourcefile(
                 header_footer_manager_module
             ),
@@ -1575,7 +1710,15 @@ async def debug_docs_runtime_info(
     )
 
 
-@server.tool()
+@server.tool(
+    title="Create Table with Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("create_table_with_data", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def create_table_with_data(
@@ -1675,7 +1818,15 @@ async def create_table_with_data(
         return f"ERROR: {message}"
 
 
-@server.tool()
+@server.tool(
+    title="Debug Table Structure",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("debug_table_structure", is_read_only=True, service_type="docs")
 @require_google_service("docs", "docs_read")
 async def debug_table_structure(
@@ -1762,7 +1913,15 @@ async def debug_table_structure(
     return f"Table structure debug for table {table_index}:\n\n{json.dumps(debug_info, indent=2)}\n\nLink: {link}"
 
 
-@server.tool()
+@server.tool(
+    title="Export Doc to PDF",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("export_doc_to_pdf", service_type="drive")
 @require_google_service("drive", "drive_file")
 async def export_doc_to_pdf(
@@ -1860,7 +2019,8 @@ async def export_doc_to_pdf(
                 fields="id, name, webViewLink, parents",
                 supportsAllDrives=True,
             )
-            .execute
+            .execute,
+            num_retries=GOOGLE_API_WRITE_RETRIES,
         )
 
         pdf_file_id = uploaded_file.get("id")
@@ -1917,7 +2077,15 @@ async def _get_paragraph_start_indices_in_range(
     return paragraph_starts or [start_index]
 
 
-@server.tool()
+@server.tool(
+    title="Update Paragraph Style",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("update_paragraph_style", service_type="docs")
 @require_google_service("docs", "docs_write")
 async def update_paragraph_style(
@@ -1959,7 +2127,9 @@ async def update_paragraph_style(
     Args:
         user_google_email: User's Google email address
         document_id: Document ID to modify
-        start_index: Start position (1-based)
+        start_index: Start position using Docs API indices from
+            inspect_doc_structure. For the main body, 0 is also accepted as an
+            alias for the first writable position.
         end_index: End position (exclusive) - should cover the entire paragraph
         heading_level: Heading level 0-6 (0 = NORMAL_TEXT, 1 = H1, 2 = H2, etc.)
                        Use for semantic document structure
@@ -2014,8 +2184,8 @@ async def update_paragraph_style(
     )
 
     # Validate range
-    if start_index < 1:
-        return "Error: start_index must be >= 1"
+    if start_index < 0:
+        return "Error: start_index must be >= 0"
     if end_index <= start_index:
         return "Error: end_index must be greater than start_index"
 
@@ -2134,7 +2304,9 @@ async def update_paragraph_style(
     if named_style_type is not None:
         summary_parts.append(named_style_type)
     elif heading_level is not None:
-        summary_parts.append("NORMAL_TEXT" if heading_level == 0 else f"HEADING_{heading_level}")
+        summary_parts.append(
+            "NORMAL_TEXT" if heading_level == 0 else f"HEADING_{heading_level}"
+        )
     detail_labels = [
         name
         for name, value in [
@@ -2169,7 +2341,15 @@ async def update_paragraph_style(
     return f"Applied paragraph formatting ({', '.join(summary_parts)}) to range {start_index}-{end_index} in document {document_id}. Link: {link}"
 
 
-@server.tool()
+@server.tool(
+    title="Get Doc as Markdown",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("get_doc_as_markdown", is_read_only=True, service_type="docs")
 @require_multiple_services(
     [
@@ -2236,15 +2416,25 @@ async def get_doc_as_markdown(
         f"[get_doc_as_markdown] Doc={document_id}, comments={include_comments}, mode={comment_mode}"
     )
 
-    # Fetch document content via Docs API
-    doc = await asyncio.to_thread(
-        docs_service.documents()
-        .get(
-            documentId=document_id,
-            suggestionsViewMode=suggestions_view_mode,
+    # Fetch document content via Docs API (includeTabsContent for multi-tab docs)
+    try:
+        doc = await asyncio.wait_for(
+            asyncio.to_thread(
+                docs_service.documents()
+                .get(
+                    documentId=document_id,
+                    includeTabsContent=True,
+                    suggestionsViewMode=suggestions_view_mode,
+                )
+                .execute
+            ),
+            timeout=30,
         )
-        .execute
-    )
+    except (TimeoutError, asyncio.TimeoutError):
+        return (
+            f"Error: Timed out fetching document {document_id} from Google Docs API. "
+            "The document may be too large or there may be a network issue. Please try again."
+        )
 
     markdown = convert_doc_to_markdown(doc)
 
@@ -2288,125 +2478,279 @@ async def get_doc_as_markdown(
         return markdown.rstrip("\n") + "\n\n" + appendix
 
 
-@server.tool()
-@handle_http_errors("insert_doc_tab", service_type="docs")
+def _find_tab_end_index(doc: dict, target_tab_id: str) -> Optional[int]:
+    """Walk the document tabs tree and return the end index of target tab's body.
+
+    Returns:
+        The end index of the tab's body content, or ``None`` when the
+        *target_tab_id* does not exist in the document or when the matching tab
+        has no ``documentTab``.
+    """
+
+    def walk(tabs: list) -> Optional[int]:
+        for tab in tabs:
+            tab_props = tab.get("tabProperties", {})
+            if tab_props.get("tabId") == target_tab_id:
+                if "documentTab" not in tab:
+                    return None
+                document_tab = tab.get("documentTab", {})
+                body = document_tab.get("body", {})
+                content = body.get("content", [])
+                if content:
+                    return content[-1].get("endIndex", 1)
+                return 1
+            child_tabs = tab.get("childTabs", [])
+            if child_tabs:
+                found = walk(child_tabs)
+                if found is not None:
+                    return found
+        return None
+
+    return walk(doc.get("tabs", []))
+
+
+class CreateDocTabResponse(TypedDict):
+    action: Literal["create"]
+    success: bool
+    message: str
+    tab_id: Optional[str]
+    requests_applied: int
+    link: Optional[str]
+
+
+class DeleteDocTabResponse(TypedDict):
+    action: Literal["delete"]
+    success: bool
+    message: str
+    tab_id: Optional[str]
+    requests_applied: int
+    link: Optional[str]
+
+
+class RenameDocTabResponse(TypedDict):
+    action: Literal["rename"]
+    success: bool
+    message: str
+    tab_id: Optional[str]
+    requests_applied: int
+    link: Optional[str]
+
+
+class PopulateMarkdownTabResponse(TypedDict):
+    action: Literal["populate_from_markdown"]
+    success: bool
+    message: str
+    tab_id: Optional[str]
+    requests_applied: int
+    link: Optional[str]
+
+
+ManageDocTabResponse = Union[
+    CreateDocTabResponse,
+    DeleteDocTabResponse,
+    RenameDocTabResponse,
+    PopulateMarkdownTabResponse,
+]
+
+
+@server.tool(
+    title="Manage Doc Tab",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("manage_doc_tab", service_type="docs")
 @require_google_service("docs", "docs_write")
-async def insert_doc_tab(
+async def manage_doc_tab(
     service: Any,
     user_google_email: str,
     document_id: str,
-    title: str,
-    index: int,
+    action: Literal["create", "rename", "delete", "populate_from_markdown"],
+    tab_id: Optional[str] = None,
+    title: Optional[str] = None,
+    index: Optional[int] = None,
     parent_tab_id: Optional[str] = None,
-) -> str:
+    markdown_text: Optional[str] = None,
+    replace_existing: bool = True,
+) -> ManageDocTabResponse:
     """
-    Inserts a new tab into a Google Doc.
+    Manage document tabs: create, rename, delete, or populate from Markdown.
 
     Args:
         user_google_email: User's Google email address
-        document_id: ID of the document to update
-        title: Title of the new tab
-        index: Position index for the new tab (0-based among sibling tabs)
-        parent_tab_id: Optional ID of a parent tab to nest the new tab under
+        document_id: ID of the document
+        action: Action to perform - "create", "rename", "delete", or "populate_from_markdown"
+        tab_id: Tab ID (required for rename, delete, populate_from_markdown; use inspect_doc_structure to find IDs)
+        title: Tab title (required for create; used by rename)
+        index: Position index for new tab, 0-based among siblings (required for create)
+        parent_tab_id: Optional parent tab ID to nest under (create only)
+        markdown_text: Markdown source to render (populate_from_markdown only)
+        replace_existing: Clear tab body before inserting markdown (default True)
 
     Returns:
-        str: Confirmation message with document link
+        dict with action result including document link
     """
-    logger.info(f"[insert_doc_tab] Doc={document_id}, title='{title}', index={index}")
-
-    request = create_insert_doc_tab_request(title, index, parent_tab_id)
-    result = await asyncio.to_thread(
-        service.documents()
-        .batchUpdate(documentId=document_id, body={"requests": [request]})
-        .execute
-    )
-
-    # Extract the new tab ID from the batchUpdate response
-    tab_id = None
-    if "replies" in result and result["replies"]:
-        reply = result["replies"][0]
-        if "createDocumentTab" in reply:
-            tab_id = reply["createDocumentTab"].get("tabProperties", {}).get("tabId")
-
+    logger.info(f"[manage_doc_tab] action={action}, doc={document_id}, tab_id={tab_id}")
     link = f"https://docs.google.com/document/d/{document_id}/edit"
-    msg = f"Inserted tab '{title}' at index {index} in document {document_id}."
-    if tab_id:
-        msg += f" Tab ID: {tab_id}."
-    if parent_tab_id:
-        msg += f" Nested under parent tab {parent_tab_id}."
-    return f"{msg} Link: {link}"
 
+    if action == "create":
+        if not title:
+            raise UserInputError("'title' is required for the 'create' action.")
+        if index is None:
+            raise UserInputError("'index' is required for the 'create' action.")
 
-@server.tool()
-@handle_http_errors("delete_doc_tab", service_type="docs")
-@require_google_service("docs", "docs_write")
-async def delete_doc_tab(
-    service: Any,
-    user_google_email: str,
-    document_id: str,
-    tab_id: str,
-) -> str:
-    """
-    Deletes a tab from a Google Doc by its tab ID.
+        request = create_insert_doc_tab_request(title, index, parent_tab_id)
+        result = await asyncio.to_thread(
+            service.documents()
+            .batchUpdate(documentId=document_id, body={"requests": [request]})
+            .execute
+        )
 
-    Args:
-        user_google_email: User's Google email address
-        document_id: ID of the document to update
-        tab_id: ID of the tab to delete (use inspect_doc_structure to find tab IDs)
+        new_tab_id = None
+        if "replies" in result and result["replies"]:
+            reply = result["replies"][0]
+            # Google returns under "addDocumentTab"; accept "createDocumentTab"
+            # as a defensive fallback.
+            for key in ("addDocumentTab", "createDocumentTab"):
+                if key in reply:
+                    new_tab_id = reply[key].get("tabProperties", {}).get("tabId")
+                    break
 
-    Returns:
-        str: Confirmation message with document link
-    """
-    logger.info(f"[delete_doc_tab] Doc={document_id}, tab_id='{tab_id}'")
+        msg = f"Inserted tab '{title}' at index {index} in document {document_id}."
+        if new_tab_id:
+            msg += f" Tab ID: {new_tab_id}."
+        if parent_tab_id:
+            msg += f" Nested under parent tab {parent_tab_id}."
+        return {
+            "action": action,
+            "success": True,
+            "message": msg,
+            "tab_id": new_tab_id,
+            "requests_applied": 1,
+            "link": link,
+        }
 
-    request = create_delete_doc_tab_request(tab_id)
+    if action == "delete":
+        if not tab_id:
+            raise UserInputError("'tab_id' is required for the 'delete' action.")
+
+        request = create_delete_doc_tab_request(tab_id)
+        await asyncio.to_thread(
+            service.documents()
+            .batchUpdate(documentId=document_id, body={"requests": [request]})
+            .execute
+        )
+        return {
+            "action": action,
+            "success": True,
+            "message": f"Deleted tab '{tab_id}' from document {document_id}.",
+            "tab_id": tab_id,
+            "requests_applied": 1,
+            "link": link,
+        }
+
+    if action == "rename":
+        if not tab_id:
+            raise UserInputError("'tab_id' is required for the 'rename' action.")
+        if not title:
+            raise UserInputError("'title' is required for the 'rename' action.")
+
+        request = create_update_doc_tab_request(tab_id, title)
+        await asyncio.to_thread(
+            service.documents()
+            .batchUpdate(documentId=document_id, body={"requests": [request]})
+            .execute
+        )
+        return {
+            "action": action,
+            "success": True,
+            "message": f"Renamed tab '{tab_id}' to '{title}' in document {document_id}.",
+            "tab_id": tab_id,
+            "requests_applied": 1,
+            "link": link,
+        }
+
+    # action == "populate_from_markdown"
+    if not tab_id:
+        raise UserInputError(
+            "'tab_id' is required for the 'populate_from_markdown' action."
+        )
+    if markdown_text is None:
+        raise UserInputError(
+            "'markdown_text' is required for the 'populate_from_markdown' action."
+        )
+
+    all_requests: List[dict] = []
+
+    doc = await asyncio.to_thread(
+        service.documents().get(documentId=document_id, includeTabsContent=True).execute
+    )
+    try:
+        tab_end = _find_tab_end_index(doc, tab_id)
+    except ValueError as exc:
+        raise UserInputError(str(exc))
+    if tab_end is None:
+        raise UserInputError(f"'{tab_id}' not found in document")
+
+    if replace_existing:
+        # tab_end includes the segment-terminating newline that Google Docs
+        # refuses to delete, so we delete up to tab_end - 1. Empty tabs
+        # (tab_end <= 2) have nothing to clear.
+        if tab_end > 2:
+            all_requests.append(
+                {
+                    "deleteContentRange": {
+                        "range": {
+                            "startIndex": 1,
+                            "endIndex": tab_end - 1,
+                            "tabId": tab_id,
+                        }
+                    }
+                }
+            )
+        all_requests.extend(markdown_to_docs_requests(markdown_text, tab_id=tab_id))
+    else:
+        # Append after existing content instead of prepending at index 1.
+        insert_at = tab_end - 1 if tab_end > 2 else 1
+        all_requests.extend(
+            markdown_to_docs_requests(
+                markdown_text, tab_id=tab_id, start_index=insert_at
+            )
+        )
+
+    if not all_requests:
+        return {
+            "action": action,
+            "success": True,
+            "message": (
+                f"No changes applied to tab '{tab_id}' in document {document_id}; "
+                "markdown produced no requests."
+            ),
+            "tab_id": tab_id,
+            "requests_applied": 0,
+            "link": link,
+        }
+
     await asyncio.to_thread(
         service.documents()
-        .batchUpdate(documentId=document_id, body={"requests": [request]})
+        .batchUpdate(documentId=document_id, body={"requests": all_requests})
         .execute
     )
 
-    link = f"https://docs.google.com/document/d/{document_id}/edit"
-    return f"Deleted tab '{tab_id}' from document {document_id}. Link: {link}"
-
-
-@server.tool()
-@handle_http_errors("update_doc_tab", service_type="docs")
-@require_google_service("docs", "docs_write")
-async def update_doc_tab(
-    service: Any,
-    user_google_email: str,
-    document_id: str,
-    tab_id: str,
-    title: str,
-) -> str:
-    """
-    Renames a tab in a Google Doc.
-
-    Args:
-        user_google_email: User's Google email address
-        document_id: ID of the document to update
-        tab_id: ID of the tab to rename (use inspect_doc_structure to find tab IDs)
-        title: New title for the tab
-
-    Returns:
-        str: Confirmation message with document link
-    """
-    logger.info(
-        f"[update_doc_tab] Doc={document_id}, tab_id='{tab_id}', title='{title}'"
-    )
-
-    request = create_update_doc_tab_request(tab_id, title)
-    await asyncio.to_thread(
-        service.documents()
-        .batchUpdate(documentId=document_id, body={"requests": [request]})
-        .execute
-    )
-
-    link = f"https://docs.google.com/document/d/{document_id}/edit"
-    return (
-        f"Renamed tab '{tab_id}' to '{title}' in document {document_id}. Link: {link}"
-    )
+    return {
+        "action": action,
+        "success": True,
+        "message": (
+            f"Populated tab '{tab_id}' in document {document_id} "
+            f"from {len(markdown_text)} characters of markdown."
+        ),
+        "requests_applied": len(all_requests),
+        "tab_id": tab_id,
+        "link": link,
+    }
 
 
 # Create comment management tools for documents

@@ -7,21 +7,27 @@ This module provides MCP tools for interacting with Google Chat API.
 import base64
 import logging
 import asyncio
+import ssl
 from typing import Dict, List, Optional
 
 import httpx
 from googleapiclient.errors import HttpError
 
+from mcp.types import ToolAnnotations
+
 # Auth & server utilities
 from auth.service_decorator import require_google_service, require_multiple_services
 from core.server import server
-from core.utils import handle_http_errors
+from core.utils import TransientNetworkError, handle_http_errors
 
 logger = logging.getLogger(__name__)
 
 # In-memory cache for user ID → display name (bounded to avoid unbounded growth)
 _SENDER_CACHE_MAX_SIZE = 256
 _sender_name_cache: Dict[str, str] = {}
+_SEARCH_MESSAGES_MAX_CONCURRENT_SPACE_FETCHES = 1
+_SEARCH_MESSAGES_SSL_RETRIES = 3
+_SEARCH_MESSAGES_RETRY_BASE_DELAY_SECONDS = 1
 
 
 def _cache_sender(user_id: str, name: str) -> None:
@@ -83,6 +89,35 @@ async def _resolve_sender(people_service, sender_obj: dict) -> str:
     return user_id
 
 
+async def _execute_chat_request(
+    request_factory,
+    *,
+    request_label: str,
+    retries: int = 1,
+    semaphore: Optional[asyncio.Semaphore] = None,
+):
+    """Execute a Chat API request in a worker thread with optional SSL retries."""
+    for attempt in range(retries):
+        try:
+            if semaphore is None:
+                return await asyncio.to_thread(lambda: request_factory().execute())
+            async with semaphore:
+                return await asyncio.to_thread(lambda: request_factory().execute())
+        except ssl.SSLError as e:
+            if attempt == retries - 1:
+                raise
+            delay = _SEARCH_MESSAGES_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+            logger.warning(
+                "[search_messages] SSL error during %s on attempt %s/%s: %s. Retrying in %s seconds.",
+                request_label,
+                attempt + 1,
+                retries,
+                e,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
 def _extract_rich_links(msg: dict) -> List[str]:
     """Extract URLs from RICH_LINK annotations (smart chips).
 
@@ -100,7 +135,15 @@ def _extract_rich_links(msg: dict) -> List[str]:
     return urls
 
 
-@server.tool()
+@server.tool(
+    title="List Spaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @require_google_service("chat", "chat_spaces_readonly")
 @handle_http_errors("list_spaces", service_type="chat")
 async def list_spaces(
@@ -144,7 +187,15 @@ async def list_spaces(
     return "\n".join(output)
 
 
-@server.tool()
+@server.tool(
+    title="Get Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @require_multiple_services(
     [
         {"service_type": "chat", "scopes": "chat_read", "param_name": "chat_service"},
@@ -199,17 +250,17 @@ async def get_messages(
     if not messages:
         return f"No messages found in space '{space_name}' (ID: {space_id})."
 
-    # Pre-resolve unique senders in parallel
+    # Pre-resolve unique senders sequentially. The underlying googleapiclient/httplib2
+    # service objects are not safe to fan out across worker threads.
     sender_lookup = {}
     for msg in messages:
         s = msg.get("sender", {})
         key = s.get("name", "")
         if key and key not in sender_lookup:
             sender_lookup[key] = s
-    resolved_names = await asyncio.gather(
-        *[_resolve_sender(people_service, s) for s in sender_lookup.values()]
-    )
-    sender_map = dict(zip(sender_lookup.keys(), resolved_names))
+    sender_map = {}
+    for key, sender_obj in sender_lookup.items():
+        sender_map[key] = await _resolve_sender(people_service, sender_obj)
 
     output = [f"Messages from '{space_name}' (ID: {space_id}):\n"]
     for msg in messages:
@@ -260,7 +311,15 @@ async def get_messages(
     return "\n".join(output)
 
 
-@server.tool()
+@server.tool(
+    title="Send Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @require_google_service("chat", "chat_write")
 @handle_http_errors("send_message", service_type="chat")
 async def send_message(
@@ -309,7 +368,15 @@ async def send_message(
     return msg
 
 
-@server.tool()
+@server.tool(
+    title="Search Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
 @require_multiple_services(
     [
         {"service_type": "chat", "scopes": "chat_read", "param_name": "chat_service"},
@@ -320,7 +387,7 @@ async def send_message(
         },
     ]
 )
-@handle_http_errors("search_messages", service_type="chat")
+@handle_http_errors("search_messages", is_read_only=True, service_type="chat")
 async def search_messages(
     chat_service,
     people_service,
@@ -351,12 +418,9 @@ async def search_messages(
         f"[search_messages] Email={user_google_email}, Query='{query}', TimeFilter='{time_filter}'"
     )
 
-    # Build API filter string. Keep client-side filtering as a fallback so
-    # result formatting stays consistent even if the backend returns extra rows.
+    # Google Chat messages.list supports time/thread filters, but not full-text
+    # search. Apply only supported API filters, then filter message text below.
     filter_parts = []
-    if query:
-        escaped_query = query.replace("\\", "\\\\").replace('"', '\\"')
-        filter_parts.append(f'text:"{escaped_query}"')
     if time_filter:
         filter_parts.append(time_filter)
     filter_str = " AND ".join(filter_parts) if filter_parts else None
@@ -373,41 +437,68 @@ async def search_messages(
         list_params = {"parent": space_id, "pageSize": page_size}
         if filter_str:
             list_params["filter"] = filter_str
-        response = await asyncio.to_thread(
-            chat_service.spaces().messages().list(**list_params).execute
+        response = await _execute_chat_request(
+            lambda: chat_service.spaces().messages().list(**list_params),
+            request_label=f"fetching messages for {space_id}",
+            retries=_SEARCH_MESSAGES_SSL_RETRIES,
         )
         messages = response.get("messages", [])
         context = f"space '{space_id}'"
     else:
         # Search across all accessible spaces
-        spaces_response = await asyncio.to_thread(
-            chat_service.spaces().list(pageSize=100).execute
+        spaces_response = await _execute_chat_request(
+            lambda: chat_service.spaces().list(pageSize=100),
+            request_label="listing accessible spaces",
+            retries=_SEARCH_MESSAGES_SSL_RETRIES,
         )
         spaces = spaces_response.get("spaces", [])
+        spaces_to_search = spaces[:max_spaces]
+        fetch_semaphore = asyncio.Semaphore(
+            _SEARCH_MESSAGES_MAX_CONCURRENT_SPACE_FETCHES
+        )
 
-        async def fetch_space_messages(space: dict) -> List[dict]:
+        async def fetch_space_messages(space: dict) -> tuple[List[dict], bool]:
             try:
                 list_params = {"parent": space.get("name"), "pageSize": page_size}
                 if filter_str:
                     list_params["filter"] = filter_str
-                response = await asyncio.to_thread(
-                    chat_service.spaces().messages().list(**list_params).execute
+                response = await _execute_chat_request(
+                    lambda: chat_service.spaces().messages().list(**list_params),
+                    request_label=f"fetching messages for {space.get('name')}",
+                    retries=_SEARCH_MESSAGES_SSL_RETRIES,
+                    semaphore=fetch_semaphore,
                 )
                 msgs = response.get("messages", [])
                 display = space.get("displayName", "Unknown")
                 for msg in msgs:
                     msg["_space_name"] = display
-                return msgs
+                return msgs, False
             except HttpError as e:
                 logger.debug(
                     "Skipping space %s during search: %s", space.get("name"), e
                 )
-                return []
+                return [], False
+            except ssl.SSLError as e:
+                logger.warning(
+                    "Skipping space %s during search after repeated SSL failures: %s",
+                    space.get("name"),
+                    e,
+                )
+                return [], True
 
         results = await asyncio.gather(
-            *(fetch_space_messages(s) for s in spaces[:max_spaces])
+            *(fetch_space_messages(space) for space in spaces_to_search)
         )
-        messages = [msg for batch in results for msg in batch]
+        transient_failures = 0
+        messages = []
+        for batch, had_transient_failure in results:
+            messages.extend(batch)
+            transient_failures += int(had_transient_failure)
+        if spaces_to_search and transient_failures == len(spaces_to_search):
+            raise TransientNetworkError(
+                "A transient SSL error occurred in 'search_messages' while searching Chat spaces. "
+                "Please try again shortly."
+            )
         context = "all accessible spaces"
 
     # Client-side text filtering (text: operator is not supported by the API)
@@ -416,19 +507,24 @@ async def search_messages(
         messages = [m for m in messages if query_lower in (m.get("text") or "").lower()]
 
     if not messages:
-        return f"No messages found matching '{search_desc}' in {context}."
+        suffix = (
+            f" Skipped {transient_failures} spaces due to repeated SSL failures."
+            if "transient_failures" in locals() and transient_failures
+            else ""
+        )
+        return f"No messages found matching '{search_desc}' in {context}.{suffix}"
 
-    # Pre-resolve unique senders in parallel
+    # Resolve senders sequentially. The underlying googleapiclient/httplib2
+    # service objects are not safe to fan out heavily and can trigger SSL churn.
     sender_lookup = {}
     for msg in messages:
         s = msg.get("sender", {})
         key = s.get("name", "")
         if key and key not in sender_lookup:
             sender_lookup[key] = s
-    resolved_names = await asyncio.gather(
-        *[_resolve_sender(people_service, s) for s in sender_lookup.values()]
-    )
-    sender_map = dict(zip(sender_lookup.keys(), resolved_names))
+    sender_map = {}
+    for key, sender_obj in sender_lookup.items():
+        sender_map[key] = await _resolve_sender(people_service, sender_obj)
 
     output = [f"Found {len(messages)} messages matching '{search_desc}' in {context}:"]
     for msg in messages:
@@ -459,7 +555,15 @@ async def search_messages(
     return "\n".join(output)
 
 
-@server.tool()
+@server.tool(
+    title="Create Reaction",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @require_google_service("chat", "chat_write")
 @handle_http_errors("create_reaction", service_type="chat")
 async def create_reaction(
@@ -495,7 +599,15 @@ async def create_reaction(
     return f"Reacted with {emoji_unicode} on message {message_id}. Reaction ID: {reaction_name}"
 
 
-@server.tool()
+@server.tool(
+    title="Download Chat Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 @handle_http_errors("download_chat_attachment", is_read_only=True, service_type="chat")
 @require_google_service("chat", "chat_read")
 async def download_chat_attachment(

@@ -45,7 +45,10 @@ calendar:
     - get_events
     - manage_event
   extended:
+    - create_calendar
     - query_freebusy
+    - manage_out_of_office
+    - manage_focus_time
   complete: []
 
 docs:
@@ -70,6 +73,7 @@ docs:
     - inspect_doc_structure
     - create_table_with_data
     - debug_table_structure
+    - manage_doc_tab
 
 sheets:
   core:
@@ -80,8 +84,12 @@ sheets:
     - list_spreadsheets
     - get_spreadsheet_info
     - format_sheet_range
+    - list_sheet_tables
   complete:
     - create_sheet
+    - append_table_rows
+    - resize_sheet_dimensions
+    - move_sheet_rows
     - list_spreadsheet_comments
     - manage_spreadsheet_comment
     - manage_conditional_formatting
