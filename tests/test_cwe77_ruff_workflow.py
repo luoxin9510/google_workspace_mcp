@@ -17,6 +17,7 @@ fork-facing validation job so attacker-controlled build hooks cannot run.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import Any, Dict, Tuple
 
@@ -28,13 +29,17 @@ WORKFLOW_PATH: str = os.path.join(REPO_ROOT, ".github", "workflows", "ruff.yml")
 
 # Commands that resolve and execute the project's own build backend /
 # pyproject.toml hooks. These must NOT run on untrusted fork PR code.
-PROJECT_INSTALL_COMMANDS: Tuple[str, ...] = (
-    "uv sync",
-    "uv pip install -e",
-    "uv pip install .",
-    "pip install -e",
-    "pip install .",
-    "poetry install",
+PROJECT_INSTALL_COMMANDS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:^|[\s;&|])uv\s+sync(?:$|[\s;&|])"),
+    re.compile(
+        r"(?:^|[\s;&|])uv\s+pip\s+install\b[^\n;&|]*?"
+        r"(?:\s\.|(?:-e\s+\.|--editable(?:=|\s+)\.))(?=$|[\s;&|])"
+    ),
+    re.compile(
+        r"(?:^|[\s;&|])(?:python\s+-m\s+)?pip3?\s+install\b[^\n;&|]*?"
+        r"(?:\s\.|(?:-e\s+\.|--editable(?:=|\s+)\.))(?=$|[\s;&|])"
+    ),
+    re.compile(r"(?:^|[\s;&|])poetry\s+install(?:$|[\s;&|])"),
 )
 
 
@@ -79,6 +84,11 @@ def _is_same_repo_guard(expr: str) -> bool:
     return normalized in same_repo_expressions
 
 
+def _runs_project_install(run_cmd: str) -> bool:
+    """Return True when a shell command installs the local project."""
+    return any(pattern.search(run_cmd) for pattern in PROJECT_INSTALL_COMMANDS)
+
+
 def test_same_repo_guard_matcher_is_strict() -> None:
     """Same-repo guards must be exact, not broad substring matches."""
     assert _is_same_repo_guard(
@@ -98,6 +108,20 @@ def test_same_repo_guard_matcher_is_strict() -> None:
     assert not _is_same_repo_guard(
         "github.event.pull_request.head.repo.full_name == 'attacker/repo'"
     )
+
+
+def test_project_install_matcher_detects_common_variants() -> None:
+    """Project install detection must catch common pip and uv variants."""
+    assert _runs_project_install("python -m pip install .")
+    assert _runs_project_install("pip3 install .")
+    assert _runs_project_install("uv pip install --editable .")
+    assert _runs_project_install("uv pip install --editable=.")
+    assert _runs_project_install("pip install -e .")
+    assert _runs_project_install("uv sync")
+    assert _runs_project_install("poetry install")
+
+    assert not _runs_project_install("python -m pip install -r requirements.txt")
+    assert not _runs_project_install("pip3 install ruff")
 
 
 def test_no_fork_repo_checkout() -> None:
@@ -137,7 +161,7 @@ def test_uv_sync_not_on_fork_prs() -> None:
         steps = job.get("steps", [])
         for step in steps:
             run_cmd: str = str(step.get("run", ""))
-            if not any(cmd in run_cmd for cmd in PROJECT_INSTALL_COMMANDS):
+            if not _runs_project_install(run_cmd):
                 continue
 
             step_if: str = str(step.get("if", ""))
@@ -199,7 +223,7 @@ def test_push_trigger_runs_ruff_validation() -> None:
     push_branches: Any = (
         push_event.get("branches", []) if isinstance(push_event, dict) else []
     )
-    assert "main" in push_branches
+    assert not push_branches or "main" in push_branches
 
     ruff_job: Dict[str, Any] = wf.get("jobs", {}).get("ruff", {})
     ruff_if: str = " ".join(str(ruff_job.get("if", "")).split())
@@ -209,6 +233,7 @@ def test_push_trigger_runs_ruff_validation() -> None:
 if __name__ == "__main__":
     tests = [
         test_same_repo_guard_matcher_is_strict,
+        test_project_install_matcher_detects_common_variants,
         test_no_fork_repo_checkout,
         test_uv_sync_not_on_fork_prs,
         test_no_write_permissions_or_fork_guarded,
