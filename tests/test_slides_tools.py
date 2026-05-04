@@ -52,6 +52,61 @@ async def test_batch_update_rejects_insert_text_targeting_slide_id():
 
 
 @pytest.mark.asyncio
+async def test_batch_update_rejects_insert_text_targeting_other_page_ids():
+    service, presentations = _build_slides_service(
+        presentation={
+            "slides": [{"objectId": "slide_1"}],
+            "masters": [{"objectId": "master_1"}],
+            "layouts": [{"objectId": "layout_1"}],
+            "notesMasters": [{"objectId": "notes_master_1"}],
+        }
+    )
+
+    with pytest.raises(UserInputError) as exc_info:
+        await _unwrap(batch_update_presentation)(
+            service=service,
+            user_google_email="user@example.com",
+            presentation_id="presentation-1",
+            requests=[
+                {
+                    "insertText": {
+                        "objectId": "master_1",
+                        "insertionIndex": 0,
+                        "text": "Title",
+                    }
+                },
+                {
+                    "insertText": {
+                        "objectId": "layout_1",
+                        "insertionIndex": 0,
+                        "text": "Title",
+                    }
+                },
+                {
+                    "insertText": {
+                        "objectId": "notes_master_1",
+                        "insertionIndex": 0,
+                        "text": "Title",
+                    }
+                },
+            ],
+        )
+
+    message = str(exc_info.value)
+    assert "requests[0].insertText.objectId='master_1'" in message
+    assert "requests[1].insertText.objectId='layout_1'" in message
+    assert "requests[2].insertText.objectId='notes_master_1'" in message
+    presentations.get.assert_called_once_with(
+        presentationId="presentation-1",
+        fields=(
+            "slides(objectId),masters(objectId),"
+            "layouts(objectId),notesMasters(objectId)"
+        ),
+    )
+    presentations.batchUpdate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_batch_update_allows_insert_text_targeting_created_shape():
     service, presentations = _build_slides_service(
         batch_update_response={

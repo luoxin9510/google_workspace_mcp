@@ -51,13 +51,20 @@ def _find_created_slide_ids(requests: List[Dict[str, Any]]) -> set[str]:
 async def _get_presentation_slide_ids(service, presentation_id: str) -> set[str]:
     result = await asyncio.to_thread(
         service.presentations()
-        .get(presentationId=presentation_id, fields="slides(objectId)")
+        .get(
+            presentationId=presentation_id,
+            fields=(
+                "slides(objectId),masters(objectId),"
+                "layouts(objectId),notesMasters(objectId)"
+            ),
+        )
         .execute
     )
     return {
-        slide["objectId"]
-        for slide in result.get("slides", [])
-        if isinstance(slide.get("objectId"), str)
+        page["objectId"]
+        for page_type in ("slides", "masters", "layouts", "notesMasters")
+        for page in result.get(page_type, [])
+        if isinstance(page.get("objectId"), str)
     }
 
 
