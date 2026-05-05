@@ -1097,6 +1097,7 @@ def _prepare_gmail_message(
         content_base64 = attachment.get("content")
         resolved_bytes = attachment.get("_resolved_bytes")
         mime_type = attachment.get("mime_type")
+        content_id = attachment.get("content_id")
 
         try:
             if resolved_bytes is not None:
@@ -1146,14 +1147,49 @@ def _prepare_gmail_message(
                 if mime_type and "/" in mime_type
                 else ("application", "octet-stream")
             )
-            message.add_attachment(
-                file_data,
-                maintype=main_type,
-                subtype=sub_type,
-                filename=safe_filename,
-            )
+            if content_id:
+                cid_value = str(content_id).strip("<>").strip()
+                # Find the right MIME part to attach the inline image to.
+                # First inline image: target text/html (creates multipart/related).
+                # Subsequent inline images: target the existing multipart/related
+                # (appends as sibling). Use walk() for recursive search since
+                # iter_parts() only iterates direct children and html may be nested
+                # inside multipart/related after the first inline image is added.
+                target = None
+                for part in message.walk():
+                    if part.get_content_type() == "multipart/related":
+                        target = part
+                        break
+                if target is None:
+                    for part in message.walk():
+                        if part.get_content_type() == "text/html":
+                            target = part
+                            break
+                if target is None:
+                    target = message  # Plain-text body fallback
+                target.add_related(
+                    file_data,
+                    maintype=main_type,
+                    subtype=sub_type,
+                    cid=f"<{cid_value}>",
+                    filename=safe_filename,
+                    disposition="inline",
+                )
+                logger.info(
+                    f"Attached inline (cid={cid_value}): "
+                    f"{safe_filename} ({len(file_data)} bytes)"
+                )
+            else:
+                message.add_attachment(
+                    file_data,
+                    maintype=main_type,
+                    subtype=sub_type,
+                    filename=safe_filename,
+                )
+                logger.info(
+                    f"Attached file: {safe_filename} ({len(file_data)} bytes)"
+                )
             attached_count += 1
-            logger.info(f"Attached file: {safe_filename} ({len(file_data)} bytes)")
         except (binascii.Error, ValueError) as e:
             logger.error(f"Failed to decode attachment {filename or file_path}: {e}")
             attachment_errors.append(_format_attachment_error(file_path, filename, e))
@@ -1907,7 +1943,7 @@ async def send_gmail_message(
     attachments: Annotated[
         Optional[DictList],
         Field(
-            description='Optional list of attachments. Each can have: "url" (fetch from URL — works with MCP attachment URLs from get_drive_file_download_url / get_gmail_attachment_content), OR "path" (file path, auto-encodes), OR "content" (standard base64, not urlsafe) + "filename". Optional "mime_type". Example: [{"url": "https://host/attachments/abc-123", "filename": "report.pdf"}]',
+            description='Optional list of attachments. Each can have: "url" (fetch from URL — works with MCP attachment URLs from get_drive_file_download_url / get_gmail_attachment_content), OR "path" (file path, auto-encodes), OR "content" (standard base64, not urlsafe) + "filename". Optional "mime_type". Optional "content_id" (string) makes the attachment inline-rendered: it lands in a multipart/related part with `Content-ID: <content_id>` and `Content-Disposition: inline`, and the HTML body can reference it via `<img src="cid:<content_id>">` (RFC 2392). Without `content_id` the attachment is a regular multipart/mixed attachment. Example: [{"url": "https://host/attachments/abc-123", "filename": "report.pdf"}]',
         ),
     ] = None,
     include_signature: Annotated[
@@ -2153,7 +2189,7 @@ async def draft_gmail_message(
     attachments: Annotated[
         Optional[DictList],
         Field(
-            description="Optional list of attachments. Each can have: 'url' (fetch from URL — works with MCP attachment URLs from get_drive_file_download_url / get_gmail_attachment_content), OR 'path' (file path, auto-encodes), OR 'content' (standard base64, not urlsafe) + 'filename'. Optional 'mime_type' (auto-detected if not provided).",
+            description="Optional list of attachments. Each can have: 'url' (fetch from URL — works with MCP attachment URLs from get_drive_file_download_url / get_gmail_attachment_content), OR 'path' (file path, auto-encodes), OR 'content' (standard base64, not urlsafe) + 'filename'. Optional 'mime_type'. Optional 'content_id' (string) makes the attachment inline-rendered: it lands in a multipart/related part with `Content-ID: <content_id>` and `Content-Disposition: inline`, and the HTML body can reference it via `<img src=\"cid:<content_id>\">` (RFC 2392). Without `content_id` the attachment is a regular multipart/mixed attachment.",
         ),
     ] = None,
     include_signature: Annotated[
